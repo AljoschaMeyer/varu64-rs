@@ -17,6 +17,7 @@ use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
 use futures_core::{Future, Poll};
+use futures_core::Async::{Ready, Pending};
 use futures_core::task::Context;
 use futures_io::{AsyncRead, AsyncWrite, Error as FutError};
 
@@ -129,7 +130,7 @@ pub fn encode_bytes(mut int: u64, bytes: &mut [u8]) -> Option<u8> {
 pub fn decode_reader<R: Read>(reader: &mut R) -> IoResult<(u64, u8)> {
     let mut decoded = 0;
     let mut shift_by = 0;
-    let mut byte = [0u8; 1];
+    let mut byte = [0u8];
 
     for i in 0..9 {
         let read = reader.read(&mut byte)?;
@@ -176,7 +177,8 @@ pub fn encode_writer<W: Write>(mut int: u64, writer: &mut W) -> IoResult<u8> {
 pub struct Decode<R> {
     reader: Option<R>,
     decoded: u64,
-    offset: u8,
+    i: u8,
+    shift_by: u8,
 }
 
 impl<R> Decode<R> {
@@ -185,20 +187,50 @@ impl<R> Decode<R> {
         Decode {
             reader: Some(reader),
             decoded: 0,
-            offset: 0,
+            i: 0,
+            shift_by: 0,
         }
     }
 }
 
 impl<R: AsyncRead> Future for Decode<R> {
-    /// The decoded `u64`, and how many bytes were read decoding it.
-    type Item = (u64, u8);
+    /// The wrapped reader, the decoded `u64`, and how many bytes were read decoding it.
+    type Item = (R, u64, u8);
     /// Propagated from reading, or an error of kind "UnexpectedEof" if a call to `poll_read`
     /// returned 0 even though the encoding indicates that more data should follow.
-    type Error = FutError;
+    type Error = (R, FutError);
 
     fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
-        unimplemented!()
+        let mut reader = self.reader
+            .take()
+            .expect("Polled Decode future after completion");
+
+        let mut byte = [0u8];
+
+        match reader.poll_read(cx, &mut byte) {
+            Ok(Ready(read)) => {
+                if read == 0 {
+                    Err((reader, Error::new(UnexpectedEof, "Failed to read varu64")))
+                } else {
+                    if byte[0] < 0b1000_0000 || self.i == 8 {
+                        Ok(Ready((reader,
+                                  self.decoded | (byte[0] as u64) << self.shift_by,
+                                  (self.i + 1) as u8)))
+                    } else {
+                        self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
+                        self.shift_by += 7;
+                        self.i += 1;
+                        self.reader = Some(reader);
+                        self.poll(cx)
+                    }
+                }
+            }
+            Ok(Pending) => {
+                self.reader = Some(reader);
+                Ok(Pending)
+            }
+            Err(err) => Err((reader, err)),
+        }
     }
 }
 
@@ -362,7 +394,6 @@ mod tests {
     #[test]
     fn decode_reader_special() {
         // Missing data is an error
-        let nope = decode_reader(&mut Cursor::new([0b1000_0000]));
         assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000]))
                        .unwrap_err()
                        .kind(),
@@ -402,64 +433,23 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_future() {
-        assert_eq!(block_on(Decode::new(AllowStdIo::new(Cursor::new([0b0000_0000])))).unwrap(),
-                   (0, 1));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b0000_0000])).unwrap(),
-        //            (0, 1));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b0000_0001])).unwrap(),
-        //            (1, 1));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b0111_1111])).unwrap(),
-        //            (127, 1));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b0000_0001])).unwrap(),
-        //            (128, 2));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111, 0b0000_0001])).unwrap(),
-        //            (255, 2));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1010_1100, 0b0000_0010])).unwrap(),
-        //            (300, 2));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b1000_0000, 0b0000_0001]))
-        //                .unwrap(),
-        //            (16384, 3));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b0000_0001]))
-        //                    .unwrap(),
-        //            (2u64.pow(56), 9));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000,
-        //                                            0b1000_0000]))
-        //                    .unwrap(),
-        //            (2u64.pow(63), 9));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111,
-        //                                            0b1111_1111]))
-        //                    .unwrap(),
-        //            (MAX_U64, 9));
-        //
-        // // Missing data is an error
-        // let nope = decode_reader(&mut Cursor::new([0b1000_0000]));
-        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000]))
-        //                .unwrap_err()
-        //                .kind(),
-        //            UnexpectedEof);
+    fn decode_future_data() {
+        for data in TESTDATA.iter() {
+            let (_, decoded, len) = block_on(Decode::new(AllowStdIo::new(Cursor::new(data.0))))
+                .unwrap();
+            assert_eq!(decoded, data.1);
+            assert_eq!(len, data.0.len() as u8);
+        }
+    }
+
+    #[test]
+    fn decode_future_special() {
+        // Missing data is an error
+        assert_eq!(block_on(Decode::new(AllowStdIo::new(Cursor::new([0b1000_0000]))))
+                       .unwrap_err()
+                       .1
+                       .kind(),
+                   UnexpectedEof);
     }
 }
 
