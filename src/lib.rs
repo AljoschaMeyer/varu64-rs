@@ -6,7 +6,8 @@
 extern crate futures_core;
 extern crate futures_io;
 
-use std::io::{Read, Write, Result as IoResult};
+use std::io::{Read, Write, Error, Result as IoResult, Cursor};
+use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
 use futures_core::{Future, Poll};
@@ -119,8 +120,27 @@ pub fn encode_bytes(mut int: u64, bytes: &mut [u8]) -> Option<u8> {
 ///
 /// Propagates all errors from calling `read`, and yields an error of kind "UnexpectedEof" if a
 /// call to `read` returns 0 even though the encoding indicates that more data should follow.
-pub fn decode_reader<R: Read>(reader: R) -> IoResult<(u64, u8)> {
-    unimplemented!()
+pub fn decode_reader<R: Read>(reader: &mut R) -> IoResult<(u64, u8)> {
+    let mut decoded = 0;
+    let mut shift_by = 0;
+    let mut byte = [0u8; 1];
+
+    for i in 0..9 {
+        let read = reader.read(&mut byte)?;
+
+        if read == 0 {
+            return Err(Error::new(UnexpectedEof, "Failed to read varu64"));
+        } else {
+            if byte[0] < 0b1000_0000 || i == 8 {
+                return Ok((decoded | (byte[0] as u64) << shift_by, (i + 1) as u8));
+            } else {
+                decoded |= ((byte[0] & 0b0111_1111) as u64) << shift_by;
+                shift_by += 7;
+            }
+        }
+    }
+
+    unreachable!()
 }
 
 /// Try to encode into a `Write`, flushing as needed, and returning how many bytes were written.
@@ -129,6 +149,29 @@ pub fn decode_reader<R: Read>(reader: R) -> IoResult<(u64, u8)> {
 /// call to `write` returns 0 even though not all data has been written.
 pub fn encode_writer<W: Write>(int: u64, writer: W) -> IoResult<u8> {
     unimplemented!()
+
+    // let mut offset = 0;
+    //
+    // while int >= 0b1000_0000 && offset < 8 {
+    //     match bytes.get_mut(offset) {
+    //         Some(ptr) => {
+    //             *ptr = (int as u8) | 0b1000_0000;
+    //         }
+    //         None => {
+    //             return None;
+    //         }
+    //     }
+    //     int >>= 7;
+    //     offset += 1;
+    // }
+    //
+    // match bytes.get_mut(offset) {
+    //     Some(ptr) => {
+    //         *ptr = int as u8;
+    //         Some((offset + 1) as u8)
+    //     }
+    //     None => None,
+    // }
 }
 
 /// A future for decoding a u64 from an `AsyncRead`.
@@ -194,6 +237,20 @@ impl<W: AsyncWrite> Future for Encode<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_len() {
+        assert_eq!(len(0), 1);
+        assert_eq!(len(1), 1);
+        assert_eq!(len(127), 1);
+        assert_eq!(len(128), 2);
+        assert_eq!(len(255), 2);
+        assert_eq!(len(300), 2);
+        assert_eq!(len(16384), 3);
+        assert_eq!(len(2u64.pow(56)), 9);
+        assert_eq!(len(2u64.pow(63)), 9);
+        assert_eq!(len(MAX_U64), 9);
+    }
 
     #[test]
     fn test_decode_bytes() {
@@ -317,6 +374,65 @@ mod tests {
 
         let mut buf = [42u8];
         assert!(encode_bytes(128, &mut buf).is_none());
+    }
+
+    #[test]
+    fn test_decode_reader() {
+        assert_eq!(decode_reader(&mut Cursor::new([0b0000_0000])).unwrap(),
+                   (0, 1));
+        assert_eq!(decode_reader(&mut Cursor::new([0b0000_0001])).unwrap(),
+                   (1, 1));
+        assert_eq!(decode_reader(&mut Cursor::new([0b0111_1111])).unwrap(),
+                   (127, 1));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b0000_0001])).unwrap(),
+                   (128, 2));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111, 0b0000_0001])).unwrap(),
+                   (255, 2));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1010_1100, 0b0000_0010])).unwrap(),
+                   (300, 2));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b1000_0000, 0b0000_0001]))
+                       .unwrap(),
+                   (16384, 3));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b0000_0001]))
+                           .unwrap(),
+                   (2u64.pow(56), 9));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000,
+                                                   0b1000_0000]))
+                           .unwrap(),
+                   (2u64.pow(63), 9));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111,
+                                                   0b1111_1111]))
+                           .unwrap(),
+                   (MAX_U64, 9));
+
+        // Missing data is an error
+        let nope = decode_reader(&mut Cursor::new([0b1000_0000]));
+        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000]))
+                       .unwrap_err()
+                       .kind(),
+                   UnexpectedEof);
     }
 }
 
