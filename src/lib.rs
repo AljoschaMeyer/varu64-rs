@@ -1,46 +1,51 @@
-// TODO deny missing docs
+//! A variable length encoding of u64 integers, based on [multiformats varints](https://github.com/multiformats/unsigned-varint/blob/8a6574bd229d9e158dad43acbcea7763b7807362/README.md),
+//! but using the most significant bit of a 9-byte encoded integer to encode the most significant
+//! bit of a u64 rather than using it a a continuation bit.
+#![deny(missing_docs)]
 
 extern crate futures_core;
 extern crate futures_io;
 
 use std::io::{Read, Write, Result as IoResult};
+use std::u64::MAX as MAX_U64;
 
 use futures_core::{Future, Poll};
 use futures_core::task::Context;
 use futures_io::{AsyncRead, AsyncWrite, Error as FutError};
 
-/// The largest number of bytes an encoding can conusme.
+/// The largest number of bytes an encoding can consume.
 pub const MAX_LENGTH: u8 = 9;
 
-/// The largest u64 that fits into one byte of encoding.
-pub const MAX_1: u64 = (2 ^ (7 * 1)) - 1;
+/// The largest u64 that fits into one byte of encoding: 2u64.pow(7 * 1) - 1
+pub const MAX_1: u64 = 127;
 
-/// The largest u64 that fits into two bytes of encoding.
-pub const MAX_2: u64 = (2 ^ (7 * 2)) - 1;
+/// The largest u64 that fits into two bytes of encoding: 2u64.pow(7 * 2) - 1
+pub const MAX_2: u64 = 16383;
 
-/// The largest u64 that fits into three bytes of encoding.
-pub const MAX_3: u64 = (2 ^ (7 * 3)) - 1;
+/// The largest u64 that fits into three bytes of encoding: 2u64.pow(7 * 3) - 1
+pub const MAX_3: u64 = 2097151;
 
-/// The largest u64 that fits into four bytes of encoding.
-pub const MAX_4: u64 = (2 ^ (7 * 4)) - 1;
+/// The largest u64 that fits into four bytes of encoding: 2u64.pow(7 * 4) - 1
+pub const MAX_4: u64 = 268435455;
 
-/// The largest u64 that fits into five bytes of encoding.
-pub const MAX_5: u64 = (2 ^ (7 * 5)) - 1;
+/// The largest u64 that fits into five bytes of encoding: 2u64.pow(7 * 5) - 1
+pub const MAX_5: u64 = 34359738367;
 
-/// The largest u64 that fits into six bytes of encoding.
-pub const MAX_6: u64 = (2 ^ (7 * 6)) - 1;
+/// The largest u64 that fits into six bytes of encoding: 2u64.pow(7 * 6) - 1
+pub const MAX_6: u64 = 4398046511103;
 
-/// The largest u64 that fits into seven bytes of encoding.
-pub const MAX_7: u64 = (2 ^ (7 * 7)) - 1;
+/// The largest u64 that fits into seven bytes of encoding: 2u64.pow(7 * 7) - 1
+pub const MAX_7: u64 = 562949953421311;
 
-/// The largest u64 that fits into eight bytes of encoding.
-pub const MAX_8: u64 = (2 ^ (7 * 8)) - 1;
+/// The largest u64 that fits into eight bytes of encoding: 2u64.pow(7 * 8) - 1
+pub const MAX_8: u64 = 72057594037927935;
 
 /// The largest u64 that fits into nine bytes of encoding.
-pub const MAX_9: u64 = (2 ^ ((7 * 9) + 1)) - 1;
+pub const MAX_9: u64 = MAX_U64;
 
 /// Return the number of bytes needed to encode the given u64.
 pub fn len(int: u64) -> u8 {
+    // Could use base-7-ogarithms (rounded up) to actually compute this.
     if int <= MAX_1 {
         1
     } else if int <= MAX_2 {
@@ -67,7 +72,20 @@ pub fn len(int: u64) -> u8 {
 /// Returns the decoded u64 on success (use `len` to find out how many bytes of the buffer where
 /// read), or `None` if decoding failed because the slice was not long enough.
 pub fn decode_bytes(bytes: &[u8]) -> Option<u64> {
-    unimplemented!()
+    let mut decoded = 0;
+    let mut shift_by = 0;
+
+    for (offset, &byte) in bytes.iter().enumerate() {
+        if byte < 0b1000_0000 || offset == 8 {
+            println!("{:?}", (byte as u64) << shift_by);
+            return Some(decoded | (byte as u64) << shift_by);
+        } else {
+            decoded |= ((byte & 0b0111_1111) as u64) << shift_by;
+            shift_by += 7;
+        }
+    }
+
+    return None;
 }
 
 /// Try to decode from a slice of bytes.
@@ -174,9 +192,59 @@ impl<W: AsyncWrite> Future for Encode<W> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn test_decode_bytes() {
+        assert_eq!(decode_bytes(&[0b0000_0000]), Some(0));
+        assert_eq!(decode_bytes(&[0b0000_0001]), Some(1));
+        assert_eq!(decode_bytes(&[0b0111_1111]), Some(127));
+        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0001]), Some(128));
+        assert_eq!(decode_bytes(&[0b1111_1111, 0b0000_0001]), Some(255));
+        assert_eq!(decode_bytes(&[0b1010_1100, 0b0000_0010]), Some(300));
+        assert_eq!(decode_bytes(&[0b1000_0000, 0b1000_0000, 0b0000_0001]),
+                   Some(16384));
+        assert_eq!(decode_bytes(&[0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b0000_0001]),
+                   Some(2u64.pow(56)));
+        assert_eq!(decode_bytes(&[0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000,
+                                  0b1000_0000]),
+                   Some(2u64.pow(63)));
+        assert_eq!(decode_bytes(&[0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111]),
+                   Some(MAX_U64));
+
+        // Trailing data is ok
+        assert_eq!(decode_bytes(&[0b0000_0000, 42]), Some(0));
+
+        // Missing data is an error
+        assert_eq!(decode_bytes(&[0b1000_0000]), None);
+
+        // Continuation followed by 0 is ok.
+        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0000]), Some(0));
+        assert_eq!(decode_bytes(&[0b1000_0000, 0b1000_0000, 0b0000_0000]),
+                   Some(0));
     }
 }
 
