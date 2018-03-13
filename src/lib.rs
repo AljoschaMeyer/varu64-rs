@@ -208,21 +208,19 @@ impl<R: AsyncRead> Future for Decode<R> {
         let mut byte = [0u8];
 
         match reader.poll_read(cx, &mut byte) {
+            Ok(Ready(0)) => Err((reader, Error::new(UnexpectedEof, "Failed to read varu64"))),
             Ok(Ready(read)) => {
-                if read == 0 {
-                    Err((reader, Error::new(UnexpectedEof, "Failed to read varu64")))
+                debug_assert!(read == 1);
+                if byte[0] < 0b1000_0000 || self.i == 8 {
+                    Ok(Ready((reader,
+                              self.decoded | (byte[0] as u64) << self.shift_by,
+                              (self.i + 1) as u8)))
                 } else {
-                    if byte[0] < 0b1000_0000 || self.i == 8 {
-                        Ok(Ready((reader,
-                                  self.decoded | (byte[0] as u64) << self.shift_by,
-                                  (self.i + 1) as u8)))
-                    } else {
-                        self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
-                        self.shift_by += 7;
-                        self.i += 1;
-                        self.reader = Some(reader);
-                        self.poll(cx)
-                    }
+                    self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
+                    self.shift_by += 7;
+                    self.i += 1;
+                    self.reader = Some(reader);
+                    self.poll(cx)
                 }
             }
             Ok(Pending) => {
@@ -243,7 +241,7 @@ pub struct Encode<W> {
 
 impl<W> Encode<W> {
     /// Create a new `Encode` future for encoding the given `u64` into the given `W`.
-    pub fn new(int: u64, writer: W) -> Encode<W> {
+    pub fn new(writer: W, int: u64) -> Encode<W> {
         Encode {
             writer: Some(writer),
             int,
@@ -253,14 +251,42 @@ impl<W> Encode<W> {
 }
 
 impl<W: AsyncWrite> Future for Encode<W> {
-    /// How many bytes were written into the `W`.
-    type Item = u8;
+    /// The wrapped `W`, and how many bytes were written into the `W`.
+    type Item = (W, u8);
     /// Propagated from writing, or an error of kind "WriteZero" if a call to `poll_write` returned
     /// 0 even though not all data has been written.
-    type Error = FutError;
+    type Error = (W, FutError);
 
+    /// Note that this does not flush or close the wrapped `W`.
     fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
-        unimplemented!()
+        let mut writer = self.writer
+            .take()
+            .expect("Polled Encode future after completion");
+
+        if self.int >= 0b1000_0000 && self.offset < 8 {
+            match writer.poll_write(cx, &[(self.int as u8) | 0b1000_0000]) {
+                Ok(Ready(0)) => Err((writer, Error::new(WriteZero, "Failed to write varu64"))),
+                Ok(Ready(written)) => {
+                    debug_assert!(written == 1);
+                    self.int >>= 7;
+                    self.offset += 1;
+                    self.writer = Some(writer);
+                    self.poll(cx)
+                }
+                Ok(Pending) => Ok(Pending),
+                Err(err) => Err((writer, err)),
+            }
+        } else {
+            match writer.poll_write(cx, &[self.int as u8]) {
+                Ok(Ready(0)) => Err((writer, Error::new(WriteZero, "Failed to write varu64"))),
+                Ok(Ready(written)) => {
+                    debug_assert!(written == 1);
+                    Ok(Ready((writer, (self.offset + 1) as u8)))
+                }
+                Ok(Pending) => Ok(Pending),
+                Err(err) => Err((writer, err)),
+            }
+        }
     }
 }
 
@@ -269,7 +295,6 @@ mod tests {
     use super::*;
 
     use std::io::Cursor;
-    use std::io::ErrorKind::Interrupted;
 
     use futures_executor::block_on;
     use futures_util::io::AllowStdIo;
@@ -451,6 +476,37 @@ mod tests {
                        .kind(),
                    UnexpectedEof);
     }
-}
 
-// TODO test everything
+    #[test]
+    fn encode_future_data() {
+        for data in TESTDATA.iter() {
+            let (writer, len) = block_on(Encode::new(AllowStdIo::new(vec![]), data.1)).unwrap();
+            assert_eq!(len, data.0.len() as u8);
+            assert_eq!(&writer.into_inner()[..data.0.len()], data.0);
+        }
+    }
+
+    #[test]
+    fn encode_future_special() {
+        let mut buf = [];
+        assert_eq!(block_on(Encode::new(AllowStdIo::new(Cursor::new(&mut buf[..])), 0))
+                       .unwrap_err()
+                       .1
+                       .kind(),
+                   WriteZero);
+
+        let mut buf = [];
+        assert_eq!(block_on(Encode::new(AllowStdIo::new(Cursor::new(&mut buf[..])), 128))
+                       .unwrap_err()
+                       .1
+                       .kind(),
+                   WriteZero);
+
+        let mut buf = [42u8];
+        assert_eq!(block_on(Encode::new(AllowStdIo::new(Cursor::new(&mut buf[..])), 128))
+                       .unwrap_err()
+                       .1
+                       .kind(),
+                   WriteZero);
+    }
+}
