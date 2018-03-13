@@ -7,9 +7,13 @@
 extern crate atm_io_utils;
 extern crate futures_core;
 extern crate futures_io;
+#[cfg(test)]
+extern crate futures_util;
+#[cfg(test)]
+extern crate futures_executor;
 
-use std::io::{Read, Write, Error, Result as IoResult, Cursor};
-use std::io::ErrorKind::{UnexpectedEof, WriteZero, Interrupted};
+use std::io::{Read, Write, Error, Result as IoResult};
+use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
 use futures_core::{Future, Poll};
@@ -176,7 +180,7 @@ pub struct Decode<R> {
 }
 
 impl<R> Decode<R> {
-    /// Create a new `Decode` future for decoding form the given `R`.
+    /// Create a new `Decode` future for decoding from the given `R`.
     pub fn new(reader: R) -> Decode<R> {
         Decode {
             reader: Some(reader),
@@ -232,6 +236,12 @@ impl<W: AsyncWrite> Future for Encode<W> {
 mod tests {
     use super::*;
 
+    use std::io::Cursor;
+    use std::io::ErrorKind::Interrupted;
+
+    use futures_executor::block_on;
+    use futures_util::io::AllowStdIo;
+
     #[test]
     fn test_len() {
         assert_eq!(len(0), 1);
@@ -246,47 +256,53 @@ mod tests {
         assert_eq!(len(MAX_U64), 9);
     }
 
-    #[test]
-    fn test_decode_bytes() {
-        assert_eq!(decode_bytes(&[0b0000_0000]), Some((0, 1)));
-        assert_eq!(decode_bytes(&[0b0000_0001]), Some((1, 1)));
-        assert_eq!(decode_bytes(&[0b0111_1111]), Some((127, 1)));
-        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0001]), Some((128, 2)));
-        assert_eq!(decode_bytes(&[0b1111_1111, 0b0000_0001]), Some((255, 2)));
-        assert_eq!(decode_bytes(&[0b1010_1100, 0b0000_0010]), Some((300, 2)));
-        assert_eq!(decode_bytes(&[0b1000_0000, 0b1000_0000, 0b0000_0001]),
-                   Some((16384, 3)));
-        assert_eq!(decode_bytes(&[0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b0000_0001]),
-                   Some((2u64.pow(56), 9)));
-        assert_eq!(decode_bytes(&[0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000,
-                                  0b1000_0000]),
-                   Some((2u64.pow(63), 9)));
-        assert_eq!(decode_bytes(&[0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111]),
-                   Some((MAX_U64, 9)));
+    const TESTDATA: [(&[u8], u64); 10] = [(&[0b0000_0000], 0),
+                                          (&[0b0000_0001], 1),
+                                          (&[0b0111_1111], 127),
+                                          (&[0b1000_0000, 0b0000_0001], 128),
+                                          (&[0b1111_1111, 0b0000_0001], 255),
+                                          (&[0b1010_1100, 0b0000_0010], 300),
+                                          (&[0b1000_0000, 0b1000_0000, 0b0000_0001], 16384),
+                                          (&[0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b0000_0001],
+                                           72057594037927936), // 2u64.pow(56)
+                                          (&[0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000,
+                                             0b1000_0000],
+                                           9223372036854775808), // 2u64.pow(63)
+                                          (&[0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111,
+                                             0b1111_1111],
+                                           MAX_U64)];
 
+    #[test]
+    fn decode_bytes_data() {
+        for data in TESTDATA.iter() {
+            assert_eq!(decode_bytes(data.0), Some((data.1, data.0.len() as u8)));
+        }
+    }
+
+    #[test]
+    fn decode_bytes_special() {
         // Trailing data is ok
         assert_eq!(decode_bytes(&[0b0000_0000, 42]), Some((0, 1)));
         assert_eq!(decode_bytes(&[0b1111_1111,
@@ -310,56 +326,21 @@ mod tests {
                    Some((0, 3)));
     }
 
-    fn test_enc_bytes(int: u64, exp: &[u8]) {
-        let mut buf = [42u8; 9];
-        assert_eq!(encode_bytes(int, &mut buf).unwrap(), exp.len() as u8);
-        assert_eq!(&buf[..exp.len()], exp);
+    #[test]
+    fn encode_bytes_data() {
+        for data in TESTDATA.iter() {
+            let mut buf = [42u8; 9];
+            assert_eq!(encode_bytes(data.1, &mut buf).unwrap(), data.0.len() as u8);
+            assert_eq!(&buf[..data.0.len()], data.0);
 
-        for &byte in &buf[exp.len()..] {
-            assert_eq!(byte, 42u8);
+            for &byte in &buf[data.0.len()..] {
+                assert_eq!(byte, 42u8);
+            }
         }
     }
 
     #[test]
-    fn test_encode_bytes() {
-        test_enc_bytes(0, &[0b0000_0000]);
-        test_enc_bytes(1, &[0b0000_0001]);
-        test_enc_bytes(127, &[0b0111_1111]);
-        test_enc_bytes(128, &[0b1000_0000, 0b0000_0001]);
-        test_enc_bytes(255, &[0b1111_1111, 0b0000_0001]);
-        test_enc_bytes(300, &[0b1010_1100, 0b0000_0010]);
-        test_enc_bytes(16384, &[0b1000_0000, 0b1000_0000, 0b0000_0001]);
-        test_enc_bytes(2u64.pow(56),
-                       &[0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b0000_0001]);
-        test_enc_bytes(2u64.pow(63),
-                       &[0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000,
-                         0b1000_0000]);
-        test_enc_bytes(MAX_U64,
-                       &[0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111,
-                         0b1111_1111]);
-
+    fn encode_bytes_special() {
         let mut buf = [];
         assert!(encode_bytes(0, &mut buf).is_none());
 
@@ -371,56 +352,15 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_reader() {
-        assert_eq!(decode_reader(&mut Cursor::new([0b0000_0000])).unwrap(),
-                   (0, 1));
-        assert_eq!(decode_reader(&mut Cursor::new([0b0000_0001])).unwrap(),
-                   (1, 1));
-        assert_eq!(decode_reader(&mut Cursor::new([0b0111_1111])).unwrap(),
-                   (127, 1));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b0000_0001])).unwrap(),
-                   (128, 2));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111, 0b0000_0001])).unwrap(),
-                   (255, 2));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1010_1100, 0b0000_0010])).unwrap(),
-                   (300, 2));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b1000_0000, 0b0000_0001]))
-                       .unwrap(),
-                   (16384, 3));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b0000_0001]))
-                           .unwrap(),
-                   (2u64.pow(56), 9));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000,
-                                                   0b1000_0000]))
-                           .unwrap(),
-                   (2u64.pow(63), 9));
-        assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111,
-                                                   0b1111_1111]))
-                           .unwrap(),
-                   (MAX_U64, 9));
+    fn decode_reader_data() {
+        for data in TESTDATA.iter() {
+            assert_eq!(decode_reader(&mut Cursor::new(data.0)).unwrap(),
+                       (data.1, data.0.len() as u8));
+        }
+    }
 
+    #[test]
+    fn decode_reader_special() {
         // Missing data is an error
         let nope = decode_reader(&mut Cursor::new([0b1000_0000]));
         assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000]))
@@ -429,53 +369,19 @@ mod tests {
                    UnexpectedEof);
     }
 
-    fn test_enc_writer(int: u64, exp: &[u8]) {
-        let mut writer = vec![];
+    #[test]
+    fn encode_writer_data() {
+        for data in TESTDATA.iter() {
+            let mut writer = vec![];
 
-        assert_eq!(encode_writer(int, &mut writer).unwrap(), exp.len() as u8);
-        assert_eq!(&writer[..exp.len()], exp);
+            assert_eq!(encode_writer(data.1, &mut writer).unwrap(),
+                       data.0.len() as u8);
+            assert_eq!(&writer[..data.0.len()], data.0);
+        }
     }
 
     #[test]
-    fn test_encode_writer() {
-        test_enc_writer(0, &[0b0000_0000]);
-        test_enc_writer(1, &[0b0000_0001]);
-        test_enc_writer(127, &[0b0111_1111]);
-        test_enc_writer(128, &[0b1000_0000, 0b0000_0001]);
-        test_enc_writer(255, &[0b1111_1111, 0b0000_0001]);
-        test_enc_writer(300, &[0b1010_1100, 0b0000_0010]);
-        test_enc_writer(16384, &[0b1000_0000, 0b1000_0000, 0b0000_0001]);
-        test_enc_writer(2u64.pow(56),
-                        &[0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b0000_0001]);
-        test_enc_writer(2u64.pow(63),
-                        &[0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000,
-                          0b1000_0000]);
-        test_enc_writer(MAX_U64,
-                        &[0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111,
-                          0b1111_1111]);
-
+    fn encode_writer_special() {
         let mut buf = [];
         assert_eq!(encode_writer(0, &mut Cursor::new(&mut buf[..]))
                        .unwrap_err()
@@ -493,6 +399,67 @@ mod tests {
                        .unwrap_err()
                        .kind(),
                    WriteZero);
+    }
+
+    #[test]
+    fn test_decode_future() {
+        assert_eq!(block_on(Decode::new(AllowStdIo::new(Cursor::new([0b0000_0000])))).unwrap(),
+                   (0, 1));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b0000_0000])).unwrap(),
+        //            (0, 1));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b0000_0001])).unwrap(),
+        //            (1, 1));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b0111_1111])).unwrap(),
+        //            (127, 1));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b0000_0001])).unwrap(),
+        //            (128, 2));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111, 0b0000_0001])).unwrap(),
+        //            (255, 2));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1010_1100, 0b0000_0010])).unwrap(),
+        //            (300, 2));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000, 0b1000_0000, 0b0000_0001]))
+        //                .unwrap(),
+        //            (16384, 3));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b0000_0001]))
+        //                    .unwrap(),
+        //            (2u64.pow(56), 9));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000,
+        //                                            0b1000_0000]))
+        //                    .unwrap(),
+        //            (2u64.pow(63), 9));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111,
+        //                                            0b1111_1111]))
+        //                    .unwrap(),
+        //            (MAX_U64, 9));
+        //
+        // // Missing data is an error
+        // let nope = decode_reader(&mut Cursor::new([0b1000_0000]));
+        // assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000]))
+        //                .unwrap_err()
+        //                .kind(),
+        //            UnexpectedEof);
     }
 }
 

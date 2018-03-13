@@ -11,3 +11,7 @@ license = "AGPL-3.0"
 atm-io-utils = "0.2.1"
 futures-core = "0.2.0-alpha"
 futures-io = "0.2.0-alpha"
+
+[dev-dependencies]
+futures-util = "0.2.0-alpha"
+futures-executor = "0.2.0-alpha"
