@@ -69,16 +69,15 @@ pub fn len(int: u64) -> u8 {
 
 /// Try to decode from a slice of bytes.
 ///
-/// Returns the decoded u64 on success (use `len` to find out how many bytes of the buffer where
-/// read), or `None` if decoding failed because the slice was not long enough.
-pub fn decode_bytes(bytes: &[u8]) -> Option<u64> {
+/// Returns the decoded u64 and how many bytes were read on success, or `None` if decoding failed
+/// because the slice was not long enough.
+pub fn decode_bytes(bytes: &[u8]) -> Option<(u64, u8)> {
     let mut decoded = 0;
     let mut shift_by = 0;
 
     for (offset, &byte) in bytes.iter().enumerate() {
         if byte < 0b1000_0000 || offset == 8 {
-            println!("{:?}", (byte as u64) << shift_by);
-            return Some(decoded | (byte as u64) << shift_by);
+            return Some((decoded | (byte as u64) << shift_by, (offset + 1) as u8));
         } else {
             decoded |= ((byte & 0b0111_1111) as u64) << shift_by;
             shift_by += 7;
@@ -88,37 +87,39 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<u64> {
     return None;
 }
 
-/// Try to decode from a slice of bytes.
-///
-/// Returns the decoded u64 and how many bytes were read on success, or `None` if decoding failed
-/// because the slice was not long enough.
-pub fn decode_bytes_len(bytes: &[u8]) -> Option<(u64, u8)> {
-    unimplemented!()
-}
-
-/// Try to encode into a slice of bytes.
-pub fn encode_bytes(int: u64, bytes: &mut [u8]) -> Option<()> {
-    unimplemented!()
-}
-
 /// Try to encode into a slice of bytes, returning the length of the encoding in bytes.
-pub fn encode_bytes_len(int: u64, bytes: &mut [u8]) -> Option<u8> {
-    unimplemented!()
-}
-
-/// Try to decode from a `Read`..
 ///
-/// Propagates all errors from calling `read`, and yields an error of kind "UnexpectedEof" if a
-/// call to `read` returns 0 even though the encoding indicates that more data should follow.
-pub fn decode_reader<R: Read>(reader: R) -> IoResult<(u64, u8)> {
-    unimplemented!()
+/// Returns `None` if the given buffer is not big enough.
+pub fn encode_bytes(mut int: u64, bytes: &mut [u8]) -> Option<u8> {
+    let mut offset = 0;
+
+    while int >= 0b1000_0000 && offset < 8 {
+        match bytes.get_mut(offset) {
+            Some(ptr) => {
+                *ptr = (int as u8) | 0b1000_0000;
+            }
+            None => {
+                return None;
+            }
+        }
+        int >>= 7;
+        offset += 1;
+    }
+
+    match bytes.get_mut(offset) {
+        Some(ptr) => {
+            *ptr = int as u8;
+            Some((offset + 1) as u8)
+        }
+        None => None,
+    }
 }
 
 /// Try to decode from a `Read`, returning how many bytes were read.
 ///
 /// Propagates all errors from calling `read`, and yields an error of kind "UnexpectedEof" if a
 /// call to `read` returns 0 even though the encoding indicates that more data should follow.
-pub fn decode_reader_len<R: Read>(reader: R) -> IoResult<(u64, u8)> {
+pub fn decode_reader<R: Read>(reader: R) -> IoResult<(u64, u8)> {
     unimplemented!()
 }
 
@@ -196,14 +197,14 @@ mod tests {
 
     #[test]
     fn test_decode_bytes() {
-        assert_eq!(decode_bytes(&[0b0000_0000]), Some(0));
-        assert_eq!(decode_bytes(&[0b0000_0001]), Some(1));
-        assert_eq!(decode_bytes(&[0b0111_1111]), Some(127));
-        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0001]), Some(128));
-        assert_eq!(decode_bytes(&[0b1111_1111, 0b0000_0001]), Some(255));
-        assert_eq!(decode_bytes(&[0b1010_1100, 0b0000_0010]), Some(300));
+        assert_eq!(decode_bytes(&[0b0000_0000]), Some((0, 1)));
+        assert_eq!(decode_bytes(&[0b0000_0001]), Some((1, 1)));
+        assert_eq!(decode_bytes(&[0b0111_1111]), Some((127, 1)));
+        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0001]), Some((128, 2)));
+        assert_eq!(decode_bytes(&[0b1111_1111, 0b0000_0001]), Some((255, 2)));
+        assert_eq!(decode_bytes(&[0b1010_1100, 0b0000_0010]), Some((300, 2)));
         assert_eq!(decode_bytes(&[0b1000_0000, 0b1000_0000, 0b0000_0001]),
-                   Some(16384));
+                   Some((16384, 3)));
         assert_eq!(decode_bytes(&[0b1000_0000,
                                   0b1000_0000,
                                   0b1000_0000,
@@ -213,7 +214,7 @@ mod tests {
                                   0b1000_0000,
                                   0b1000_0000,
                                   0b0000_0001]),
-                   Some(2u64.pow(56)));
+                   Some((2u64.pow(56), 9)));
         assert_eq!(decode_bytes(&[0b1000_0000,
                                   0b1000_0000,
                                   0b1000_0000,
@@ -223,7 +224,7 @@ mod tests {
                                   0b1000_0000,
                                   0b1000_0000,
                                   0b1000_0000]),
-                   Some(2u64.pow(63)));
+                   Some((2u64.pow(63), 9)));
         assert_eq!(decode_bytes(&[0b1111_1111,
                                   0b1111_1111,
                                   0b1111_1111,
@@ -233,18 +234,89 @@ mod tests {
                                   0b1111_1111,
                                   0b1111_1111,
                                   0b1111_1111]),
-                   Some(MAX_U64));
+                   Some((MAX_U64, 9)));
 
         // Trailing data is ok
-        assert_eq!(decode_bytes(&[0b0000_0000, 42]), Some(0));
+        assert_eq!(decode_bytes(&[0b0000_0000, 42]), Some((0, 1)));
+        assert_eq!(decode_bytes(&[0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  0b1111_1111,
+                                  42]),
+                   Some((MAX_U64, 9)));
 
         // Missing data is an error
         assert_eq!(decode_bytes(&[0b1000_0000]), None);
 
         // Continuation followed by 0 is ok.
-        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0000]), Some(0));
+        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0000]), Some((0, 2)));
         assert_eq!(decode_bytes(&[0b1000_0000, 0b1000_0000, 0b0000_0000]),
-                   Some(0));
+                   Some((0, 3)));
+    }
+
+    fn test_enc_bytes(int: u64, exp: &[u8]) {
+        let mut buf = [42u8; 9];
+        assert_eq!(encode_bytes(int, &mut buf).unwrap(), exp.len() as u8);
+        assert_eq!(&buf[..exp.len()], exp);
+
+        for &byte in &buf[exp.len()..] {
+            assert_eq!(byte, 42u8);
+        }
+    }
+
+    #[test]
+    fn test_encode_bytes() {
+        test_enc_bytes(0, &[0b0000_0000]);
+        test_enc_bytes(1, &[0b0000_0001]);
+        test_enc_bytes(127, &[0b0111_1111]);
+        test_enc_bytes(128, &[0b1000_0000, 0b0000_0001]);
+        test_enc_bytes(255, &[0b1111_1111, 0b0000_0001]);
+        test_enc_bytes(300, &[0b1010_1100, 0b0000_0010]);
+        test_enc_bytes(16384, &[0b1000_0000, 0b1000_0000, 0b0000_0001]);
+        test_enc_bytes(2u64.pow(56),
+                       &[0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b0000_0001]);
+        test_enc_bytes(2u64.pow(63),
+                       &[0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000,
+                         0b1000_0000]);
+        test_enc_bytes(MAX_U64,
+                       &[0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111,
+                         0b1111_1111]);
+
+        let mut buf = [];
+        assert!(encode_bytes(0, &mut buf).is_none());
+
+        let mut buf = [];
+        assert!(encode_bytes(128, &mut buf).is_none());
+
+        let mut buf = [42u8];
+        assert!(encode_bytes(128, &mut buf).is_none());
     }
 }
 
