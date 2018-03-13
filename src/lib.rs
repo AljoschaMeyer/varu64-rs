@@ -3,11 +3,13 @@
 //! bit of a u64 rather than using it a a continuation bit.
 #![deny(missing_docs)]
 
+#[macro_use(retry)]
+extern crate atm_io_utils;
 extern crate futures_core;
 extern crate futures_io;
 
 use std::io::{Read, Write, Error, Result as IoResult, Cursor};
-use std::io::ErrorKind::{UnexpectedEof, WriteZero};
+use std::io::ErrorKind::{UnexpectedEof, WriteZero, Interrupted};
 use std::u64::MAX as MAX_U64;
 
 use futures_core::{Future, Poll};
@@ -143,35 +145,27 @@ pub fn decode_reader<R: Read>(reader: &mut R) -> IoResult<(u64, u8)> {
     unreachable!()
 }
 
-/// Try to encode into a `Write`, flushing as needed, and returning how many bytes were written.
+/// Try to encode into a `Write`, returning how many bytes were written.
 ///
-/// Propagates all errors from calling `write`, and yields an error of kind "WriteZero" if a
-/// call to `write` returns 0 even though not all data has been written.
-pub fn encode_writer<W: Write>(int: u64, writer: W) -> IoResult<u8> {
-    unimplemented!()
+/// Propagates all errors from calling `write` except `Interruped` errors, and yields an error of
+/// kind "WriteZero" if a call to `write` returns 0 even though not all data has been written.
+pub fn encode_writer<W: Write>(mut int: u64, writer: &mut W) -> IoResult<u8> {
+    let mut offset = 0;
 
-    // let mut offset = 0;
-    //
-    // while int >= 0b1000_0000 && offset < 8 {
-    //     match bytes.get_mut(offset) {
-    //         Some(ptr) => {
-    //             *ptr = (int as u8) | 0b1000_0000;
-    //         }
-    //         None => {
-    //             return None;
-    //         }
-    //     }
-    //     int >>= 7;
-    //     offset += 1;
-    // }
-    //
-    // match bytes.get_mut(offset) {
-    //     Some(ptr) => {
-    //         *ptr = int as u8;
-    //         Some((offset + 1) as u8)
-    //     }
-    //     None => None,
-    // }
+    while int >= 0b1000_0000 && offset < 8 {
+        if retry!(writer.write(&[(int as u8) | 0b1000_0000])) == 0 {
+            return Err(Error::new(WriteZero, "Failed to write varu64"));
+        } else {
+            int >>= 7;
+            offset += 1;
+        }
+    }
+
+    if retry!(writer.write(&[int as u8])) == 0 {
+        return Err(Error::new(WriteZero, "Failed to write varu64"));
+    } else {
+        return Ok((offset + 1) as u8);
+    }
 }
 
 /// A future for decoding a u64 from an `AsyncRead`.
@@ -433,6 +427,72 @@ mod tests {
                        .unwrap_err()
                        .kind(),
                    UnexpectedEof);
+    }
+
+    fn test_enc_writer(int: u64, exp: &[u8]) {
+        let mut writer = vec![];
+
+        assert_eq!(encode_writer(int, &mut writer).unwrap(), exp.len() as u8);
+        assert_eq!(&writer[..exp.len()], exp);
+    }
+
+    #[test]
+    fn test_encode_writer() {
+        test_enc_writer(0, &[0b0000_0000]);
+        test_enc_writer(1, &[0b0000_0001]);
+        test_enc_writer(127, &[0b0111_1111]);
+        test_enc_writer(128, &[0b1000_0000, 0b0000_0001]);
+        test_enc_writer(255, &[0b1111_1111, 0b0000_0001]);
+        test_enc_writer(300, &[0b1010_1100, 0b0000_0010]);
+        test_enc_writer(16384, &[0b1000_0000, 0b1000_0000, 0b0000_0001]);
+        test_enc_writer(2u64.pow(56),
+                        &[0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b0000_0001]);
+        test_enc_writer(2u64.pow(63),
+                        &[0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000,
+                          0b1000_0000]);
+        test_enc_writer(MAX_U64,
+                        &[0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111,
+                          0b1111_1111]);
+
+        let mut buf = [];
+        assert_eq!(encode_writer(0, &mut Cursor::new(&mut buf[..]))
+                       .unwrap_err()
+                       .kind(),
+                   WriteZero);
+
+        let mut buf = [];
+        assert_eq!(encode_writer(128, &mut Cursor::new(&mut buf[..]))
+                       .unwrap_err()
+                       .kind(),
+                   WriteZero);
+
+        let mut buf = [42u8];
+        assert_eq!(encode_writer(128, &mut Cursor::new(&mut buf[..]))
+                       .unwrap_err()
+                       .kind(),
+                   WriteZero);
     }
 }
 
