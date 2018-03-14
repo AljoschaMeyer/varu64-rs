@@ -3,7 +3,7 @@
 //! bit of a u64 rather than using it a a continuation bit.
 #![deny(missing_docs)]
 
-// extern crate async_serialization;
+extern crate async_serialization;
 #[macro_use(retry)]
 extern crate atm_io_utils;
 extern crate futures_core;
@@ -17,8 +17,8 @@ use std::io::{Read, Write, Error, Result as IoResult};
 use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
-// use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
-//                           AsyncSerializeLen};
+use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
+                          AsyncSerializeLen};
 use futures_core::{Future, Poll};
 use futures_core::Async::{Ready, Pending};
 use futures_core::task::Context;
@@ -286,7 +286,8 @@ impl<W: AsyncWrite> Future for Encode<W> {
                 Ok(Ready(0)) => Err((writer, Error::new(WriteZero, "Failed to write varu64"))),
                 Ok(Ready(written)) => {
                     debug_assert!(written == 1);
-                    Ok(Ready((writer, self.offset as usize + 1)))
+                    self.offset += 1;
+                    Ok(Ready((writer, self.offset as usize)))
                 }
                 Ok(Pending) => Ok(Pending),
                 Err(err) => Err((writer, err)),
@@ -295,13 +296,43 @@ impl<W: AsyncWrite> Future for Encode<W> {
     }
 }
 
-// impl<W> AsyncWriterFuture<W> for Encode<W>
-//     where W: AsyncWrite
-// {
-//     fn already_written(&self) -> usize {
-//         self.1
-//     }
-// }
+impl<W> AsyncWriterFuture<W> for Encode<W>
+    where W: AsyncWrite
+{
+    fn already_written(&self) -> usize {
+        self.offset as usize
+    }
+}
+
+impl<W> AsyncWriterFutureLen<W> for Encode<W>
+    where W: AsyncWrite
+{
+    fn remaining_bytes(&self) -> usize {
+        if self.writer.is_some() {
+            len(self.int) as usize
+        } else {
+            0
+        }
+    }
+}
+
+impl<W> AsyncSerialize<W> for Encode<W>
+    where W: AsyncWrite
+{
+    type Serialized = u64;
+
+    fn from_val(writer: W, val: Self::Serialized) -> Self {
+        Encode::new(writer, val)
+    }
+}
+
+impl<W> AsyncSerializeLen<W> for Encode<W>
+    where W: AsyncWrite
+{
+    fn total_bytes(val: &Self::Serialized) -> usize {
+        len(*val) as usize
+    }
+}
 
 #[cfg(test)]
 mod tests {
