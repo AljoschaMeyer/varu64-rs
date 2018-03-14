@@ -3,7 +3,7 @@
 //! bit of a u64 rather than using it a a continuation bit.
 #![deny(missing_docs)]
 
-extern crate async_serialization;
+// extern crate async_serialization;
 #[macro_use(retry)]
 extern crate atm_io_utils;
 extern crate futures_core;
@@ -17,8 +17,8 @@ use std::io::{Read, Write, Error, Result as IoResult};
 use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
-use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
-                          AsyncSerializeLen};
+// use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
+//                           AsyncSerializeLen};
 use futures_core::{Future, Poll};
 use futures_core::Async::{Ready, Pending};
 use futures_core::task::Context;
@@ -476,7 +476,7 @@ mod tests {
             let (_, decoded, len) = block_on(Decode::new(AllowStdIo::new(Cursor::new(data.0))))
                 .unwrap();
             assert_eq!(decoded, data.1);
-            assert_eq!(len, data.0.len() as u8);
+            assert_eq!(len, data.0.len());
         }
     }
 
@@ -494,7 +494,7 @@ mod tests {
     fn encode_future_data() {
         for data in TESTDATA.iter() {
             let (writer, len) = block_on(Encode::new(AllowStdIo::new(vec![]), data.1)).unwrap();
-            assert_eq!(len, data.0.len() as u8);
+            assert_eq!(len, data.0.len());
             assert_eq!(&writer.into_inner()[..data.0.len()], data.0);
         }
     }

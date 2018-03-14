@@ -1,6 +1,6 @@
 [package]
 name = "varu64"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["AljoschaMeyer <mail@aljoscha-meyer.de>"]
 description = "A variable length encoding for unsigned 64 bit integers."
 repository = "https://github.com/AljoschaMeyer/varu64-rs"
@@ -8,7 +8,7 @@ readme = "README.md"
 license = "AGPL-3.0"
 
 [dependencies]
-async-serialization = "0.2.0"
+# async-serialization = "0.2.0"
 atm-io-utils = "0.2.1"
 futures-core = "0.2.0-alpha"
 futures-io = "0.2.0-alpha"
