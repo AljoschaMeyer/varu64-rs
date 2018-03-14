@@ -18,8 +18,8 @@ use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
 use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
-                          AsyncSerializeLen};
-use futures_core::{Future, Poll};
+                          AsyncSerializeLen, AsyncDeserialize, DeserializeError};
+use futures_core::{Future, Poll, Never};
 use futures_core::Async::{Ready, Pending};
 use futures_core::task::Context;
 use futures_io::{AsyncRead, AsyncWrite, Error as FutError};
@@ -214,14 +214,15 @@ impl<R: AsyncRead> Future for Decode<R> {
             Ok(Ready(0)) => Err((reader, Error::new(UnexpectedEof, "Failed to read varu64"))),
             Ok(Ready(read)) => {
                 debug_assert!(read == 1);
-                if byte[0] < 0b1000_0000 || self.i == 8 {
+                self.i += 1;
+
+                if byte[0] < 0b1000_0000 || self.i == 9 {
                     Ok(Ready((reader,
                               self.decoded | (byte[0] as u64) << self.shift_by,
-                              self.i as usize + 1)))
+                              self.i as usize)))
                 } else {
                     self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
                     self.shift_by += 7;
-                    self.i += 1;
                     self.reader = Some(reader);
                     self.poll(cx)
                 }
@@ -235,7 +236,32 @@ impl<R: AsyncRead> Future for Decode<R> {
     }
 }
 
-// TODO impl async deserialization trait
+/// A decoder that implements the `AsyncDeserialize` trait.
+pub struct DecodeDeserialize<R>(Decode<R>);
+
+impl<R: AsyncRead> Future for DecodeDeserialize<R> {
+    type Item = (R, u64, usize);
+    type Error = (R, DeserializeError<Never>);
+
+    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
+        match self.0.poll(cx) {
+            Ok(async) => Ok(async),
+            Err(err) => Err((err.0, err.1.into())),
+        }
+    }
+}
+
+impl<R> AsyncDeserialize<R, u64, Never> for DecodeDeserialize<R>
+    where R: AsyncRead
+{
+    fn from_reader(reader: R) -> Self {
+        DecodeDeserialize(Decode::new(reader))
+    }
+
+    fn already_read(&self) -> usize {
+        self.0.i as usize
+    }
+}
 
 /// A future for encoding a u64 into an `AsyncWrite`.
 pub struct Encode<W> {
