@@ -3,6 +3,7 @@
 //! bit of a u64 rather than using it a a continuation bit.
 #![deny(missing_docs)]
 
+extern crate async_serialization;
 #[macro_use(retry)]
 extern crate atm_io_utils;
 extern crate futures_core;
@@ -16,6 +17,8 @@ use std::io::{Read, Write, Error, Result as IoResult};
 use std::io::ErrorKind::{UnexpectedEof, WriteZero};
 use std::u64::MAX as MAX_U64;
 
+use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
+                          AsyncSerializeLen};
 use futures_core::{Future, Poll};
 use futures_core::Async::{Ready, Pending};
 use futures_core::task::Context;
@@ -195,7 +198,7 @@ impl<R> Decode<R> {
 
 impl<R: AsyncRead> Future for Decode<R> {
     /// The wrapped reader, the decoded `u64`, and how many bytes were read decoding it.
-    type Item = (R, u64, u8);
+    type Item = (R, u64, usize);
     /// Propagated from reading, or an error of kind "UnexpectedEof" if a call to `poll_read`
     /// returned 0 even though the encoding indicates that more data should follow.
     type Error = (R, FutError);
@@ -214,7 +217,7 @@ impl<R: AsyncRead> Future for Decode<R> {
                 if byte[0] < 0b1000_0000 || self.i == 8 {
                     Ok(Ready((reader,
                               self.decoded | (byte[0] as u64) << self.shift_by,
-                              (self.i + 1) as u8)))
+                              self.i as usize + 1)))
                 } else {
                     self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
                     self.shift_by += 7;
@@ -231,6 +234,8 @@ impl<R: AsyncRead> Future for Decode<R> {
         }
     }
 }
+
+// TODO impl async deserialization trait
 
 /// A future for encoding a u64 into an `AsyncWrite`.
 pub struct Encode<W> {
@@ -252,7 +257,7 @@ impl<W> Encode<W> {
 
 impl<W: AsyncWrite> Future for Encode<W> {
     /// The wrapped `W`, and how many bytes were written into the `W`.
-    type Item = (W, u8);
+    type Item = (W, usize);
     /// Propagated from writing, or an error of kind "WriteZero" if a call to `poll_write` returned
     /// 0 even though not all data has been written.
     type Error = (W, FutError);
@@ -281,7 +286,7 @@ impl<W: AsyncWrite> Future for Encode<W> {
                 Ok(Ready(0)) => Err((writer, Error::new(WriteZero, "Failed to write varu64"))),
                 Ok(Ready(written)) => {
                     debug_assert!(written == 1);
-                    Ok(Ready((writer, (self.offset + 1) as u8)))
+                    Ok(Ready((writer, self.offset as usize + 1)))
                 }
                 Ok(Pending) => Ok(Pending),
                 Err(err) => Err((writer, err)),
@@ -289,6 +294,14 @@ impl<W: AsyncWrite> Future for Encode<W> {
         }
     }
 }
+
+// impl<W> AsyncWriterFuture<W> for Encode<W>
+//     where W: AsyncWrite
+// {
+//     fn already_written(&self) -> usize {
+//         self.1
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
