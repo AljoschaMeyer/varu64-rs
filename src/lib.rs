@@ -3,26 +3,35 @@
 //! bit of a u64 rather than using it a a continuation bit.
 #![deny(missing_docs)]
 
-extern crate async_serialization;
-#[macro_use(retry)]
+extern crate async_codec;
+#[macro_use(retry, read_nz, write_nz)]
 extern crate atm_io_utils;
+#[macro_use(try_ready)]
 extern crate futures_core;
 extern crate futures_io;
+
+#[cfg(test)]
+extern crate async_codec_util;
+#[cfg(test)]
+extern crate async_ringbuffer;
 #[cfg(test)]
 extern crate futures_util;
 #[cfg(test)]
 extern crate futures_executor;
+#[cfg(test)]
+#[macro_use(quickcheck)]
+extern crate quickcheck;
 
 use std::io::{Read, Write, Error, Result as IoResult};
 use std::io::ErrorKind::{UnexpectedEof, WriteZero};
+use std::marker::PhantomData;
 use std::u64::MAX as MAX_U64;
 
-use async_serialization::{AsyncSerialize, AsyncWriterFuture, AsyncWriterFutureLen,
-                          AsyncSerializeLen, AsyncDeserialize, DeserializeError};
-use futures_core::{Future, Poll, Never};
-use futures_core::Async::{Ready, Pending};
+use async_codec::{AsyncEncode, AsyncEncodeLen, AsyncDecode, DecodeError};
+use futures_core::{Poll, Never};
+use futures_core::Async::Ready;
 use futures_core::task::Context;
-use futures_io::{AsyncRead, AsyncWrite, Error as FutError};
+use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr};
 
 /// The largest number of bytes an encoding can consume.
 pub const MAX_LENGTH: u8 = 9;
@@ -176,187 +185,91 @@ pub fn encode_writer<W: Write>(mut int: u64, writer: &mut W) -> IoResult<u8> {
     }
 }
 
-/// A future for decoding a u64 from an `AsyncRead`.
+/// An `AsyncDecode` for decoding a VarU64.
 pub struct Decode<R> {
-    reader: Option<R>,
     decoded: u64,
-    i: u8,
+    offset: u8,
     shift_by: u8,
+    _r: PhantomData<R>,
 }
 
 impl<R> Decode<R> {
-    /// Create a new `Decode` future for decoding from the given `R`.
-    pub fn new(reader: R) -> Decode<R> {
+    /// Create a new `Decode`r for decoding a VarU64.
+    pub fn new() -> Decode<R> {
         Decode {
-            reader: Some(reader),
             decoded: 0,
-            i: 0,
+            offset: 0,
             shift_by: 0,
+            _r: PhantomData,
         }
     }
 }
 
-impl<R: AsyncRead> Future for Decode<R> {
-    /// The wrapped reader, the decoded `u64`, and how many bytes were read decoding it.
-    type Item = (R, u64, usize);
-    /// Propagated from reading, or an error of kind "UnexpectedEof" if a call to `poll_read`
-    /// returned 0 even though the encoding indicates that more data should follow.
-    type Error = (R, FutError);
+impl<R: AsyncRead> AsyncDecode<R> for Decode<R> {
+    type Item = u64;
+    type Error = Never;
 
-    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
-        let mut reader = self.reader
-            .take()
-            .expect("Polled Decode future after completion");
-
+    fn poll_decode(&mut self,
+                   cx: &mut Context,
+                   reader: &mut R)
+                   -> Poll<(Option<Self::Item>, usize), DecodeError<Self::Error>> {
         let mut byte = [0u8];
+        read_nz!(reader.poll_read(cx, &mut byte), "decode VarU64");
+        self.offset += 1;
 
-        match reader.poll_read(cx, &mut byte) {
-            Ok(Ready(0)) => Err((reader, Error::new(UnexpectedEof, "Failed to read varu64"))),
-            Ok(Ready(read)) => {
-                debug_assert!(read == 1);
-                self.i += 1;
-
-                if byte[0] < 0b1000_0000 || self.i == 9 {
-                    Ok(Ready((reader,
-                              self.decoded | (byte[0] as u64) << self.shift_by,
-                              self.i as usize)))
-                } else {
-                    self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
-                    self.shift_by += 7;
-                    self.reader = Some(reader);
-                    self.poll(cx)
-                }
-            }
-            Ok(Pending) => {
-                self.reader = Some(reader);
-                Ok(Pending)
-            }
-            Err(err) => Err((reader, err)),
+        if byte[0] < 0b1000_0000 || self.offset == 9 {
+            Ok(Ready((Some(self.decoded | (byte[0] as u64) << self.shift_by), 1)))
+        } else {
+            self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
+            self.shift_by += 7;
+            Ok(Ready((None, 1)))
         }
     }
 }
 
-/// A decoder that implements the `AsyncDeserialize` trait.
-pub struct DecodeDeserialize<R>(Decode<R>);
-
-impl<R: AsyncRead> Future for DecodeDeserialize<R> {
-    type Item = (R, u64, usize);
-    type Error = (R, DeserializeError<Never>);
-
-    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
-        match self.0.poll(cx) {
-            Ok(async) => Ok(async),
-            Err(err) => Err((err.0, err.1.into())),
-        }
-    }
-}
-
-impl<R> AsyncDeserialize<R, u64, Never> for DecodeDeserialize<R>
-    where R: AsyncRead
-{
-    fn from_reader(reader: R) -> Self {
-        DecodeDeserialize(Decode::new(reader))
-    }
-
-    fn already_read(&self) -> usize {
-        self.0.i as usize
-    }
-}
-
-/// A future for encoding a u64 into an `AsyncWrite`.
+/// An `AsyncEncode` for encoding a VarU64.
 pub struct Encode<W> {
-    writer: Option<W>,
     int: u64,
     offset: u8,
+    _w: PhantomData<W>,
 }
 
 impl<W> Encode<W> {
-    /// Create a new `Encode` future for encoding the given `u64` into the given `W`.
-    pub fn new(writer: W, int: u64) -> Encode<W> {
+    /// Create a new `Encode`r for dencoding a VarU64.
+    pub fn new(int: u64) -> Encode<W> {
         Encode {
-            writer: Some(writer),
             int,
             offset: 0,
+            _w: PhantomData,
         }
     }
 }
 
-impl<W: AsyncWrite> Future for Encode<W> {
-    /// The wrapped `W`, and how many bytes were written into the `W`.
-    type Item = (W, usize);
-    /// Propagated from writing, or an error of kind "WriteZero" if a call to `poll_write` returned
-    /// 0 even though not all data has been written.
-    type Error = (W, FutError);
-
-    /// Note that this does not flush or close the wrapped `W`.
-    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
-        let mut writer = self.writer
-            .take()
-            .expect("Polled Encode future after completion");
-
+impl<W: AsyncWrite> AsyncEncode<W> for Encode<W> {
+    fn poll_encode(&mut self, cx: &mut Context, writer: &mut W) -> Poll<usize, FutIoErr> {
         if self.int >= 0b1000_0000 && self.offset < 8 {
-            match writer.poll_write(cx, &[(self.int as u8) | 0b1000_0000]) {
-                Ok(Ready(0)) => Err((writer, Error::new(WriteZero, "Failed to write varu64"))),
-                Ok(Ready(written)) => {
-                    debug_assert!(written == 1);
-                    self.int >>= 7;
-                    self.offset += 1;
-                    self.writer = Some(writer);
-                    self.poll(cx)
-                }
-                Ok(Pending) => Ok(Pending),
-                Err(err) => Err((writer, err)),
-            }
+            write_nz!(writer.poll_write(cx, &[(self.int as u8) | 0b1000_0000]),
+                      "encode VarU64");
+            self.int >>= 7;
+            self.offset += 1;
+            Ok(Ready(1))
+        } else if self.offset != 9 {
+            write_nz!(writer.poll_write(cx, &[self.int as u8]), "encode VarU64");
+            self.offset = 9;
+            Ok(Ready(1))
         } else {
-            match writer.poll_write(cx, &[self.int as u8]) {
-                Ok(Ready(0)) => Err((writer, Error::new(WriteZero, "Failed to write varu64"))),
-                Ok(Ready(written)) => {
-                    debug_assert!(written == 1);
-                    self.offset += 1;
-                    Ok(Ready((writer, self.offset as usize)))
-                }
-                Ok(Pending) => Ok(Pending),
-                Err(err) => Err((writer, err)),
-            }
+            Ok(Ready(0))
         }
     }
 }
 
-impl<W> AsyncWriterFuture<W> for Encode<W>
-    where W: AsyncWrite
-{
-    fn already_written(&self) -> usize {
-        self.offset as usize
-    }
-}
-
-impl<W> AsyncWriterFutureLen<W> for Encode<W>
-    where W: AsyncWrite
-{
+impl<W: AsyncWrite> AsyncEncodeLen<W> for Encode<W> {
     fn remaining_bytes(&self) -> usize {
-        if self.writer.is_some() {
-            len(self.int) as usize
-        } else {
+        if self.offset == 9 {
             0
+        } else {
+            len(self.int) as usize
         }
-    }
-}
-
-impl<W> AsyncSerialize<W> for Encode<W>
-    where W: AsyncWrite
-{
-    type Serialized = u64;
-
-    fn from_val(writer: W, val: Self::Serialized) -> Self {
-        Encode::new(writer, val)
-    }
-}
-
-impl<W> AsyncSerializeLen<W> for Encode<W>
-    where W: AsyncWrite
-{
-    fn total_bytes(val: &Self::Serialized) -> usize {
-        len(*val) as usize
     }
 }
 
@@ -366,8 +279,14 @@ mod tests {
 
     use std::io::Cursor;
 
+    use async_codec_util::{decode, encode};
+    use async_codec_util::testing::{test_codec_len, unexpected_eof_errors, write_zero_errors};
     use futures_executor::block_on;
     use futures_util::io::AllowStdIo;
+
+    use quickcheck::{Arbitrary, Gen};
+    use atm_io_utils::partial::*;
+    use async_ringbuffer::ring_buffer;
 
     #[test]
     fn test_len() {
@@ -528,55 +447,67 @@ mod tests {
     }
 
     #[test]
-    fn decode_future_data() {
+    fn decode_async_data() {
         for data in TESTDATA.iter() {
-            let (_, decoded, len) = block_on(Decode::new(AllowStdIo::new(Cursor::new(data.0))))
-                .unwrap();
+            let (_, decoded, len) =
+                block_on(decode(AllowStdIo::new(Cursor::new(data.0)), Decode::new())).unwrap();
             assert_eq!(decoded, data.1);
             assert_eq!(len, data.0.len());
         }
     }
 
     #[test]
-    fn decode_future_special() {
+    fn decode_async_special() {
         // Missing data is an error
-        assert_eq!(block_on(Decode::new(AllowStdIo::new(Cursor::new([0b1000_0000]))))
-                       .unwrap_err()
-                       .1
-                       .kind(),
-                   UnexpectedEof);
+        assert!(unexpected_eof_errors(AllowStdIo::new(Cursor::new([0b1000_0000])), Decode::new()));
     }
 
     #[test]
-    fn encode_future_data() {
+    fn encode_async_data() {
         for data in TESTDATA.iter() {
-            let (writer, len) = block_on(Encode::new(AllowStdIo::new(vec![]), data.1)).unwrap();
+            let (writer, len) = block_on(encode(AllowStdIo::new(vec![]), Encode::new(data.1)))
+                .unwrap();
             assert_eq!(len, data.0.len());
             assert_eq!(&writer.into_inner()[..data.0.len()], data.0);
         }
     }
 
     #[test]
-    fn encode_future_special() {
+    fn encode_async_special() {
         let mut buf = [];
-        assert_eq!(block_on(Encode::new(AllowStdIo::new(Cursor::new(&mut buf[..])), 0))
-                       .unwrap_err()
-                       .1
-                       .kind(),
-                   WriteZero);
+        assert!(write_zero_errors(AllowStdIo::new(Cursor::new(&mut buf[..])), Encode::new(0)));
 
         let mut buf = [];
-        assert_eq!(block_on(Encode::new(AllowStdIo::new(Cursor::new(&mut buf[..])), 128))
-                       .unwrap_err()
-                       .1
-                       .kind(),
-                   WriteZero);
+        assert!(write_zero_errors(AllowStdIo::new(Cursor::new(&mut buf[..])), Encode::new(128)));
 
         let mut buf = [42u8];
-        assert_eq!(block_on(Encode::new(AllowStdIo::new(Cursor::new(&mut buf[..])), 128))
-                       .unwrap_err()
-                       .1
-                       .kind(),
-                   WriteZero);
+        assert!(write_zero_errors(AllowStdIo::new(Cursor::new(&mut buf[..])), Encode::new(128)));
+    }
+
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    struct VarU64(u64);
+
+    // Ignores `g.size()` and generates u64s of arbitrary size.
+    impl Arbitrary for VarU64 {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            VarU64(g.next_u64())
+        }
+
+        fn shrink(&self) -> Box<Iterator<Item = Self>> {
+            Box::new(self.0.shrink().map(VarU64))
+        }
+    }
+
+    quickcheck! {
+        fn codec(buf_size: usize, read_ops: Vec<PartialOp>, write_ops: Vec<PartialOp>, int: VarU64) -> bool {
+            let mut read_ops = read_ops;
+            let mut write_ops = write_ops;
+            let (w, r) = ring_buffer(buf_size + 1);
+            let w = PartialWrite::new(w, write_ops.drain(..));
+            let r = PartialRead::new(r, read_ops.drain(..));
+
+            let test_outcome = test_codec_len(r, w, Decode::new(), Encode::new(int.0));
+            test_outcome.1 && VarU64(test_outcome.0) == int
+        }
     }
 }
