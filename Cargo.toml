@@ -8,14 +8,15 @@ readme = "README.md"
 license = "AGPL-3.0"
 
 [dependencies]
-async-codec = "0.2.0"
+async-codec = "0.3.0"
+async-codec-util = "0.3.3"
 atm-io-utils = { version = "0.2.3", features = ["quickcheck"] } # quickcheck is only needed for the tests
 futures-core = "0.2.0-alpha"
 futures-io = "0.2.0-alpha"
-async-codec-util = "0.2.1"
 
 [dev-dependencies]
-async-ringbuffer = "0.3.0"
+async-byteorder = "0.3.0"
+async-ringbuffer = "0.3.1"
 futures-util = "0.2.0-alpha"
 futures-executor = "0.2.0-alpha"
 quickcheck = "0.6"

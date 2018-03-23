@@ -4,15 +4,16 @@
 #![deny(missing_docs)]
 
 extern crate async_codec;
-#[macro_use(retry, read_nz, write_nz)]
+#[macro_use(retry)]
 extern crate atm_io_utils;
-#[macro_use(try_ready)]
 extern crate futures_core;
 extern crate futures_io;
 extern crate async_codec_util;
 
 #[cfg(test)]
 extern crate async_ringbuffer;
+#[cfg(test)]
+extern crate async_byteorder;
 #[cfg(test)]
 extern crate futures_util;
 #[cfg(test)]
@@ -21,14 +22,14 @@ extern crate futures_executor;
 #[macro_use(quickcheck)]
 extern crate quickcheck;
 
-use std::io::{Read, Write, Error, Result as IoResult};
+pub mod codec;
+
+use std::io::{Read, Write, Error as IoError, Result as IoResult};
 use std::io::ErrorKind::{UnexpectedEof, WriteZero};
-use std::marker::PhantomData;
 use std::u64::MAX as MAX_U64;
 
-use async_codec::{AsyncEncode, AsyncEncodeLen, AsyncDecode, DecodeError, PollEnc, PollDec};
-use async_codec_util::encoder::{chain as enc_chain, Chain as EncChain};
-use futures_core::{Poll, Never};
+use async_codec::{AsyncEncode, AsyncEncodeLen, AsyncDecode, PollEnc, PollDec};
+use futures_core::Never;
 use futures_core::Async::{Ready, Pending};
 use futures_core::task::Context;
 use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr, ErrorKind};
@@ -148,7 +149,7 @@ pub fn decode_reader<R: Read>(reader: &mut R) -> IoResult<(u64, u8)> {
         let read = reader.read(&mut byte)?;
 
         if read == 0 {
-            return Err(Error::new(UnexpectedEof, "Failed to read varu64"));
+            return Err(IoError::new(UnexpectedEof, "Failed to read varu64"));
         } else {
             if byte[0] < 0b1000_0000 || i == 8 {
                 return Ok((decoded | (byte[0] as u64) << shift_by, (i + 1) as u8));
@@ -171,7 +172,7 @@ pub fn encode_writer<W: Write>(mut int: u64, writer: &mut W) -> IoResult<u8> {
 
     while int >= 0b1000_0000 && offset < 8 {
         if retry!(writer.write(&[(int as u8) | 0b1000_0000])) == 0 {
-            return Err(Error::new(WriteZero, "Failed to write varu64"));
+            return Err(IoError::new(WriteZero, "Failed to write varu64"));
         } else {
             int >>= 7;
             offset += 1;
@@ -179,40 +180,38 @@ pub fn encode_writer<W: Write>(mut int: u64, writer: &mut W) -> IoResult<u8> {
     }
 
     if retry!(writer.write(&[int as u8])) == 0 {
-        return Err(Error::new(WriteZero, "Failed to write varu64"));
+        return Err(IoError::new(WriteZero, "Failed to write varu64"));
     } else {
         return Ok((offset + 1) as u8);
     }
 }
 
 /// An `AsyncDecode` for decoding a VarU64.
-pub struct Decode<R> {
+pub struct Decode {
     decoded: u64,
     offset: u8,
     shift_by: u8,
-    _r: PhantomData<R>,
 }
 
-impl<R> Decode<R> {
+impl Decode {
     /// Create a new `Decode`r for decoding a VarU64.
-    pub fn new() -> Decode<R> {
+    pub fn new() -> Decode {
         Decode {
             decoded: 0,
             offset: 0,
             shift_by: 0,
-            _r: PhantomData,
         }
     }
 }
 
-impl<R: AsyncRead> AsyncDecode<R> for Decode<R> {
+impl AsyncDecode for Decode {
     type Item = u64;
     type Error = Never;
 
-    fn poll_decode(mut self,
-                   cx: &mut Context,
-                   reader: &mut R)
-                   -> PollDec<Self::Item, Self, Self::Error> {
+    fn poll_decode<R: AsyncRead>(mut self,
+                                 cx: &mut Context,
+                                 reader: &mut R)
+                                 -> PollDec<Self::Item, Self, Self::Error> {
         let mut byte = [0u8];
 
         match reader.poll_read(cx, &mut byte) {
@@ -237,25 +236,20 @@ impl<R: AsyncRead> AsyncDecode<R> for Decode<R> {
 }
 
 /// An `AsyncEncode` for encoding a VarU64.
-pub struct Encode<W> {
+pub struct Encode {
     int: u64,
     offset: u8,
-    _w: PhantomData<W>,
 }
 
-impl<W> Encode<W> {
+impl Encode {
     /// Create a new `Encode`r for dencoding a VarU64.
-    pub fn new(int: u64) -> Encode<W> {
-        Encode {
-            int,
-            offset: 0,
-            _w: PhantomData,
-        }
+    pub fn new(int: u64) -> Encode {
+        Encode { int, offset: 0 }
     }
 }
 
-impl<W: AsyncWrite> AsyncEncode<W> for Encode<W> {
-    fn poll_encode(mut self, cx: &mut Context, writer: &mut W) -> PollEnc<Self> {
+impl AsyncEncode for Encode {
+    fn poll_encode<W: AsyncWrite>(mut self, cx: &mut Context, writer: &mut W) -> PollEnc<Self> {
         if self.int >= 0b1000_0000 && self.offset < 8 {
             match writer.poll_write(cx, &[(self.int as u8) | 0b1000_0000]) {
                 Ok(Ready(0)) => {
@@ -282,7 +276,7 @@ impl<W: AsyncWrite> AsyncEncode<W> for Encode<W> {
     }
 }
 
-impl<W: AsyncWrite> AsyncEncodeLen<W> for Encode<W> {
+impl AsyncEncodeLen for Encode {
     fn remaining_bytes(&self) -> usize {
         if self.offset == 9 {
             0
@@ -292,139 +286,9 @@ impl<W: AsyncWrite> AsyncEncodeLen<W> for Encode<W> {
     }
 }
 
-// /// Wraps an `AsyncEncodeLen`, returning a new encoder that prepends the length of the inner
-// /// encoder, than encodes it.
-// pub struct PrefixLenEnc<W, C>(EncChain<W, Encode<W>, C>);
-//
-// impl<W, C> PrefixLenEnc<W, C>
-//     where W: AsyncWrite,
-//           C: AsyncEncodeLen<W>
-// {
-//     /// Create a new `PrefixLenEnc` that runs the inner encoder prefixed by its length as a VarU64.
-//     pub fn new(inner: C) -> PrefixLenEnc<W, C> {
-//         PrefixLenEnc(enc_chain(Encode::new(inner.remaining_bytes() as u64), inner))
-//     }
-// }
-//
-// impl<W, C> AsyncEncode<W> for PrefixLenEnc<W, C>
-//     where W: AsyncWrite,
-//           C: AsyncEncodeLen<W>
-// {
-//     fn poll_encode(&mut self, cx: &mut Context, writer: &mut W) -> Poll<usize, FutIoErr> {
-//         self.0.poll_encode(cx, writer)
-//     }
-// }
-//
-// impl<W, C> AsyncEncodeLen<W> for PrefixLenEnc<W, C>
-//     where W: AsyncWrite,
-//           C: AsyncEncodeLen<W>
-// {
-//     fn remaining_bytes(&self) -> usize {
-//         self.0.remaining_bytes()
-//     }
-// }
+// TODO decoder that does not error if done before reading the prefixed number of bytes, but discards them
+// TODO string, slice, vector, etc. encoding/decoding with VarU64 as length prefix
 
-// TODO move to atm-io-utils
-/// Wraps a reader and limits the number of bytes that can be read from it. Once the limit has been
-/// reached, further calls to poll_read will return `Ok(Ready(0))`.
-pub struct LimitedReader<R> {
-    inner: R,
-    remaining: usize,
-}
-
-impl<R> LimitedReader<R> {
-    /// Create a new `LimitedReader`, wrapping the given reader.
-    pub fn new(inner: R, limit: usize) -> LimitedReader<R> {
-        LimitedReader {
-            inner: inner,
-            remaining: limit,
-        }
-    }
-}
-
-impl<R: AsyncRead> AsyncRead for LimitedReader<R> {
-    fn poll_read(&mut self, cx: &mut Context, buf: &mut [u8]) -> Poll<usize, Error> {
-        self.inner.poll_read(cx, &mut buf[..self.remaining])
-    }
-}
-
-// // TODO move to async-codec-util
-// // TODO rename to State
-// enum AndThenState<S, T, F> {
-//     First(S, F),
-//     Second(T),
-// }
-//
-// /// TODO doc
-// pub struct AndThen<R, S, T, F>(AndThenState<S, T, F>, PhantomData<R>);
-//
-// impl<R, S, T, F> AndThen<R, S, T, F> {
-//     /// TODO doc
-//     pub fn new(first: S, f: F) -> AndThen<R, S, T, F> {
-//         AndThen(Some(AndThenState::First(first, f)), PhantomData)
-//     }
-// }
-//
-// impl<R, S, T, F> AsyncDecode<R> for AndThen<R, S, T, F>
-//     where R: AsyncRead,
-//           S: AsyncDecode<R>,
-//           T: AsyncDecode<R, Error = S::Error>,
-//           F: FnOnce(S::Item) -> T
-// {
-//     type Item = T::Item;
-//     type Error = T::Error;
-//
-//     fn poll_decode(mut self,
-//                    cx: &mut Context,
-//                    reader: &mut R)
-//                    -> PollDec<Self::Item, Self, Self::Error> {
-//         match self.0 {
-//             AndThenState::First(first, f) => {
-//                 match first.poll_decode(cx, reader) {
-//                     Done(item, read) => {
-//                         self.0 = AndThenState::Second(f(item));
-//                         Progress(self, read)
-//                     },
-//                     Progress(first, read) => {
-//                         self.0 = AndThenState::First(first, f);
-//                         Progress(self, read)
-//                     }
-//                     Pending(first) => {
-//                         self.0 = AndThenState::First(first, f);
-//                         Pending(self)
-//                     }
-//                     Errored(err) => Errored(err),
-//                 }
-//             }
-//             AndThenState::Second(second) => {
-//                 match second.poll_decode(cx, reader) {
-//                     Done(item, read) => {
-//                         Done(item, read)
-//                     },
-//                     Progress(second, read) => {
-//                         self.0 = AndThenState::Second(second);
-//                         Progress(self, read)
-//                     }
-//                     Pending(second) => {
-//                         self.0 = AndThenState::Second(second);
-//                         Pending(self)
-//                     }
-//                     Errored(err) => Errored(err),
-//                 }
-//             }
-//         }
-//     }
-// }
-
-// TODO instead of wrapping, take a FnOnce which receives the length as an arg. TODO turn that into a trait?
-/// Wraps an `AsyncDecode`, returning a new decoder that first reads a VarU64 and then continues
-/// with the wrapped decoder.
-///
-/// The new decoder errors if the wrapped decoder does not decode its item at exactly the right
-/// byte count.
-// pub struct PrefixLenDec {}
-
-// TODO test len prefixing
 #[cfg(test)]
 mod tests {
     use super::*;
