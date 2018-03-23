@@ -1,6 +1,6 @@
 [package]
 name = "varu64"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["AljoschaMeyer <mail@aljoscha-meyer.de>"]
 description = "A variable length encoding for unsigned 64 bit integers."
 repository = "https://github.com/AljoschaMeyer/varu64-rs"
