@@ -1,529 +1,128 @@
-//! A variable length encoding of u64 integers, based on [multiformats varints](https://github.com/multiformats/unsigned-varint/blob/8a6574bd229d9e158dad43acbcea7763b7807362/README.md),
-//! but using the most significant bit of a 9-byte encoded integer to encode the most significant
-//! bit of a u64 rather than using it a a continuation bit.
-#![deny(missing_docs)]
-
-extern crate async_codec;
-#[macro_use(retry)]
-extern crate atm_io_utils;
-extern crate futures_core;
-extern crate futures_io;
-extern crate async_codec_util;
-
-#[cfg(test)]
-extern crate async_ringbuffer;
-#[cfg(test)]
-extern crate async_byteorder;
-#[cfg(test)]
-extern crate futures_util;
-#[cfg(test)]
-extern crate futures_executor;
-#[cfg(test)]
-#[macro_use(quickcheck)]
-extern crate quickcheck;
-
-pub mod codec;
-
-use std::io::{Read, Write, Error as IoError, Result as IoResult};
-use std::io::ErrorKind::{UnexpectedEof, WriteZero};
-use std::u64::MAX as MAX_U64;
-
-use async_codec::{AsyncEncode, AsyncEncodeLen, AsyncDecode, PollEnc, PollDec};
-use futures_core::Never;
-use futures_core::Async::{Ready, Pending};
-use futures_core::task::Context;
-use futures_io::{AsyncRead, AsyncWrite, Error as FutIoErr, ErrorKind};
-
-/// The largest number of bytes an encoding can consume.
-pub const MAX_LENGTH: u8 = 9;
-
-/// The largest u64 that fits into one byte of encoding: 2u64.pow(7 * 1) - 1
-pub const MAX_1: u64 = 127;
-
-/// The largest u64 that fits into two bytes of encoding: 2u64.pow(7 * 2) - 1
-pub const MAX_2: u64 = 16383;
-
-/// The largest u64 that fits into three bytes of encoding: 2u64.pow(7 * 3) - 1
-pub const MAX_3: u64 = 2097151;
-
-/// The largest u64 that fits into four bytes of encoding: 2u64.pow(7 * 4) - 1
-pub const MAX_4: u64 = 268435455;
-
-/// The largest u64 that fits into five bytes of encoding: 2u64.pow(7 * 5) - 1
-pub const MAX_5: u64 = 34359738367;
-
-/// The largest u64 that fits into six bytes of encoding: 2u64.pow(7 * 6) - 1
-pub const MAX_6: u64 = 4398046511103;
-
-/// The largest u64 that fits into seven bytes of encoding: 2u64.pow(7 * 7) - 1
-pub const MAX_7: u64 = 562949953421311;
-
-/// The largest u64 that fits into eight bytes of encoding: 2u64.pow(7 * 8) - 1
-pub const MAX_8: u64 = 72057594037927935;
-
-/// The largest u64 that fits into nine bytes of encoding.
-pub const MAX_9: u64 = MAX_U64;
-
-/// Return the number of bytes needed to encode the given u64.
-pub fn len(int: u64) -> u8 {
-    // Could use base-7-ogarithms (rounded up) to actually compute this.
-    if int <= MAX_1 {
+/// Return how many bytes the encoding of `n` will take up.
+pub fn encoding_length(n: u64) -> usize {
+    if n < 248 {
         1
-    } else if int <= MAX_2 {
+    } else if n < 256 {
         2
-    } else if int <= MAX_3 {
+    } else if n < 65536 {
         3
-    } else if int <= MAX_4 {
+    } else if n < 16777216 {
         4
-    } else if int <= MAX_5 {
+    } else if n < 4294967296 {
         5
-    } else if int <= MAX_6 {
+    } else if n < 1099511627776 {
         6
-    } else if int <= MAX_7 {
+    } else if n < 281474976710656 {
         7
-    } else if int <= MAX_8 {
+    } else if n < 72057594037927936 {
         8
     } else {
         9
     }
 }
 
-/// Try to decode from a slice of bytes.
+/// Encodes `n` into the output buffer, returning how many bytes have been written.
 ///
-/// Returns the decoded u64 and how many bytes were read on success, or `None` if decoding failed
-/// because the slice was not long enough.
-pub fn decode_bytes(bytes: &[u8]) -> Option<(u64, u8)> {
-    let mut decoded = 0;
-    let mut shift_by = 0;
-
-    for (offset, &byte) in bytes.iter().enumerate() {
-        if byte < 0b1000_0000 || offset == 8 {
-            return Some((decoded | (byte as u64) << shift_by, (offset + 1) as u8));
-        } else {
-            decoded |= ((byte & 0b0111_1111) as u64) << shift_by;
-            shift_by += 7;
-        }
-    }
-
-    return None;
-}
-
-/// Try to encode into a slice of bytes, returning the length of the encoding in bytes.
-///
-/// Returns `None` if the given buffer is not big enough.
-pub fn encode_bytes(mut int: u64, bytes: &mut [u8]) -> Option<u8> {
-    let mut offset = 0;
-
-    while int >= 0b1000_0000 && offset < 8 {
-        match bytes.get_mut(offset) {
-            Some(ptr) => {
-                *ptr = (int as u8) | 0b1000_0000;
-            }
-            None => {
-                return None;
-            }
-        }
-        int >>= 7;
-        offset += 1;
-    }
-
-    match bytes.get_mut(offset) {
-        Some(ptr) => {
-            *ptr = int as u8;
-            Some((offset + 1) as u8)
-        }
-        None => None,
-    }
-}
-
-/// Try to decode from a `Read`, returning how many bytes were read.
-///
-/// Propagates all errors from calling `read`, and yields an error of kind "UnexpectedEof" if a
-/// call to `read` returns 0 even though the encoding indicates that more data should follow.
-pub fn decode_reader<R: Read>(reader: &mut R) -> IoResult<(u64, u8)> {
-    let mut decoded = 0;
-    let mut shift_by = 0;
-    let mut byte = [0u8];
-
-    for i in 0..9 {
-        let read = reader.read(&mut byte)?;
-
-        if read == 0 {
-            return Err(IoError::new(UnexpectedEof, "Failed to read varu64"));
-        } else {
-            if byte[0] < 0b1000_0000 || i == 8 {
-                return Ok((decoded | (byte[0] as u64) << shift_by, (i + 1) as u8));
-            } else {
-                decoded |= ((byte[0] & 0b0111_1111) as u64) << shift_by;
-                shift_by += 7;
-            }
-        }
-    }
-
-    unreachable!()
-}
-
-/// Try to encode into a `Write`, returning how many bytes were written.
-///
-/// Propagates all errors from calling `write` except `Interruped` errors, and yields an error of
-/// kind "WriteZero" if a call to `write` returns 0 even though not all data has been written.
-pub fn encode_writer<W: Write>(mut int: u64, writer: &mut W) -> IoResult<u8> {
-    let mut offset = 0;
-
-    while int >= 0b1000_0000 && offset < 8 {
-        if retry!(writer.write(&[(int as u8) | 0b1000_0000])) == 0 {
-            return Err(IoError::new(WriteZero, "Failed to write varu64"));
-        } else {
-            int >>= 7;
-            offset += 1;
-        }
-    }
-
-    if retry!(writer.write(&[int as u8])) == 0 {
-        return Err(IoError::new(WriteZero, "Failed to write varu64"));
+/// # Panics
+/// Panics if the buffer is not large enough to hold the encoding.
+pub fn encode(n: u64, out: &mut [u8]) -> usize {
+    if n < 248 {
+        out[0] = n as u8;
+        1
+    } else if n < 256 {
+        out[0] = 249;
+        write_bytes(n, 1, &mut out[1..]);
+        2
+    } else if n < 65536 {
+        out[0] = 249;
+        write_bytes(n, 2, &mut out[1..]);
+        3
+    } else if n < 16777216 {
+        out[0] = 249;
+        write_bytes(n, 3, &mut out[1..]);
+        4
+    } else if n < 4294967296 {
+        out[0] = 249;
+        write_bytes(n, 4, &mut out[1..]);
+        5
+    } else if n < 1099511627776 {
+        out[0] = 249;
+        write_bytes(n, 5, &mut out[1..]);
+        6
+    } else if n < 281474976710656 {
+        out[0] = 249;
+        write_bytes(n, 6, &mut out[1..]);
+        7
+    } else if n < 72057594037927936 {
+        out[0] = 249;
+        write_bytes(n, 7, &mut out[1..]);
+        8
     } else {
-        return Ok((offset + 1) as u8);
+        out[0] = 249;
+        write_bytes(n, 8, &mut out[1..]);
+        9
     }
 }
 
-/// An `AsyncDecode` for decoding a VarU64.
-pub struct Decode {
-    decoded: u64,
-    offset: u8,
-    shift_by: u8,
+// Write the k least significant bytes of n into out, in big-endian byteorder, panicking
+// if out is too small.
+//
+// k must be smaller than 8.
+fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
+    let bytes: [u8; 8] = unsafe { std::mem::transmute(u64::to_be(n)) };
+    for i in 0..k {
+        out[i] = bytes[(8 - k) + i];
+    }
 }
 
-impl Decode {
-    /// Create a new `Decode`r for decoding a VarU64.
-    pub fn new() -> Decode {
-        Decode {
-            decoded: 0,
-            offset: 0,
-            shift_by: 0,
+/// Decode a `u64` from the `input` buffer, returning the number and how many bytes were read.
+///
+/// # Errors
+/// On error, this also returns how many bytes were read (including the erroneous byte). In case
+/// of noncanonical data (encodings that are valid except they are not the smallest possible
+/// encoding), the full data is parsed, even if the non-canonicty can be detected early on.
+pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
+    let first: u8;
+    match input.get(0) {
+        Some(b) => first = *b,
+        None => return Err((DecodeError::UnexpectedEndOfInput, 0)),
+    }
+
+    if (first | 0b0000_0111) == 0b1111_1111 {
+        // first five bytes are ones, value is less than 248
+        Ok((first as u64, 1))
+    } else {
+        // Total length of the encoded data is 1 byte for the tag plus the value of
+        // the three least sgnificant bits incremented by 1.
+        let length = (first & 0b0000_0111) as usize + 2;
+        let mut out: u64 = 0;
+
+        for i in 1..length {
+            out <<= 8;
+            match input.get(i) {
+                Some(b) => out += *b as u64,
+                None => return Err((DecodeError::UnexpectedEndOfInput, i)),
+            }
         }
-    }
-}
 
-impl AsyncDecode for Decode {
-    type Item = u64;
-    type Error = Never;
-
-    fn poll_decode<R: AsyncRead>(mut self,
-                                 cx: &mut Context,
-                                 reader: &mut R)
-                                 -> PollDec<Self::Item, Self, Self::Error> {
-        let mut byte = [0u8];
-
-        match reader.poll_read(cx, &mut byte) {
-            Ok(Ready(0)) => {
-                PollDec::Errored(FutIoErr::new(ErrorKind::UnexpectedEof, "VarU64").into())
-            }
-            Ok(Ready(_)) => {
-                self.offset += 1;
-
-                if byte[0] < 0b1000_0000 || self.offset == 9 {
-                    PollDec::Done(self.decoded | (byte[0] as u64) << self.shift_by, 1)
-                } else {
-                    self.decoded |= ((byte[0] & 0b0111_1111) as u64) << self.shift_by;
-                    self.shift_by += 7;
-                    PollDec::Progress(self, 1)
-                }
-            }
-            Ok(Pending) => PollDec::Pending(self),
-            Err(err) => PollDec::Errored(err.into()),
-        }
-    }
-}
-
-/// An `AsyncEncode` for encoding a VarU64.
-pub struct Encode {
-    int: u64,
-    offset: u8,
-}
-
-impl Encode {
-    /// Create a new `Encode`r for dencoding a VarU64.
-    pub fn new(int: u64) -> Encode {
-        Encode { int, offset: 0 }
-    }
-}
-
-impl AsyncEncode for Encode {
-    fn poll_encode<W: AsyncWrite>(mut self, cx: &mut Context, writer: &mut W) -> PollEnc<Self> {
-        if self.int >= 0b1000_0000 && self.offset < 8 {
-            match writer.poll_write(cx, &[(self.int as u8) | 0b1000_0000]) {
-                Ok(Ready(0)) => {
-                    PollEnc::Errored(FutIoErr::new(ErrorKind::WriteZero, "VarU64").into())
-                }
-                Ok(Ready(_)) => {
-                    self.int >>= 7;
-                    self.offset += 1;
-                    PollEnc::Progress(self, 1)
-                }
-                Ok(Pending) => PollEnc::Pending(self),
-                Err(err) => PollEnc::Errored(err),
-            }
+        if length > encoding_length(out) {
+            return Err((DecodeError::NonCanonical(out), length));
         } else {
-            match writer.poll_write(cx, &[(self.int as u8)]) {
-                Ok(Ready(0)) => {
-                    PollEnc::Errored(FutIoErr::new(ErrorKind::WriteZero, "VarU64").into())
-                }
-                Ok(Ready(_)) => PollEnc::Done(1),
-                Ok(Pending) => PollEnc::Pending(self),
-                Err(err) => PollEnc::Errored(err),
-            }
+            return Ok((out, length));
         }
     }
 }
 
-impl AsyncEncodeLen for Encode {
-    fn remaining_bytes(&self) -> usize {
-        if self.offset == 9 {
-            0
-        } else {
-            len(self.int) as usize
-        }
-    }
+/// Everything that can go wrong when decoding a varu64.
+pub enum DecodeError {
+    /// The encoding is not the shortest possible one for the number.
+    /// Contains the encoded number.
+    NonCanonical(u64),
+    /// The slice contained less data than the encoding needs.
+    UnexpectedEndOfInput,
 }
 
-// TODO decoder that does not error if done before reading the prefixed number of bytes, but discards them
-// TODO string, slice, vector, etc. encoding/decoding with VarU64 as length prefix
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use std::io::Cursor;
-
-    use async_codec_util::{decode, encode};
-    use async_codec_util::testing::{test_codec_len, unexpected_eof_errors, write_zero_errors};
-    use futures_executor::block_on;
-    use futures_util::io::AllowStdIo;
-
-    use quickcheck::{Arbitrary, Gen};
-    use atm_io_utils::partial::*;
-    use async_ringbuffer::ring_buffer;
-
-    #[test]
-    fn test_len() {
-        assert_eq!(len(0), 1);
-        assert_eq!(len(1), 1);
-        assert_eq!(len(127), 1);
-        assert_eq!(len(128), 2);
-        assert_eq!(len(255), 2);
-        assert_eq!(len(300), 2);
-        assert_eq!(len(16384), 3);
-        assert_eq!(len(2u64.pow(56)), 9);
-        assert_eq!(len(2u64.pow(63)), 9);
-        assert_eq!(len(MAX_U64), 9);
-    }
-
-    const TESTDATA: [(&[u8], u64); 10] = [(&[0b0000_0000], 0),
-                                          (&[0b0000_0001], 1),
-                                          (&[0b0111_1111], 127),
-                                          (&[0b1000_0000, 0b0000_0001], 128),
-                                          (&[0b1111_1111, 0b0000_0001], 255),
-                                          (&[0b1010_1100, 0b0000_0010], 300),
-                                          (&[0b1000_0000, 0b1000_0000, 0b0000_0001], 16384),
-                                          (&[0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b0000_0001],
-                                           72057594037927936), // 2u64.pow(56)
-                                          (&[0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000,
-                                             0b1000_0000],
-                                           9223372036854775808), // 2u64.pow(63)
-                                          (&[0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111,
-                                             0b1111_1111],
-                                           MAX_U64)];
-
-    #[test]
-    fn decode_bytes_data() {
-        for data in TESTDATA.iter() {
-            assert_eq!(decode_bytes(data.0), Some((data.1, data.0.len() as u8)));
-        }
-    }
-
-    #[test]
-    fn decode_bytes_special() {
-        // Trailing data is ok
-        assert_eq!(decode_bytes(&[0b0000_0000, 42]), Some((0, 1)));
-        assert_eq!(decode_bytes(&[0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  0b1111_1111,
-                                  42]),
-                   Some((MAX_U64, 9)));
-
-        // Missing data is an error
-        assert_eq!(decode_bytes(&[0b1000_0000]), None);
-
-        // Continuation followed by 0 is ok.
-        assert_eq!(decode_bytes(&[0b1000_0000, 0b0000_0000]), Some((0, 2)));
-        assert_eq!(decode_bytes(&[0b1000_0000, 0b1000_0000, 0b0000_0000]),
-                   Some((0, 3)));
-    }
-
-    #[test]
-    fn encode_bytes_data() {
-        for data in TESTDATA.iter() {
-            let mut buf = [42u8; 9];
-            assert_eq!(encode_bytes(data.1, &mut buf).unwrap(), data.0.len() as u8);
-            assert_eq!(&buf[..data.0.len()], data.0);
-
-            for &byte in &buf[data.0.len()..] {
-                assert_eq!(byte, 42u8);
-            }
-        }
-    }
-
-    #[test]
-    fn encode_bytes_special() {
-        let mut buf = [];
-        assert!(encode_bytes(0, &mut buf).is_none());
-
-        let mut buf = [];
-        assert!(encode_bytes(128, &mut buf).is_none());
-
-        let mut buf = [42u8];
-        assert!(encode_bytes(128, &mut buf).is_none());
-    }
-
-    #[test]
-    fn decode_reader_data() {
-        for data in TESTDATA.iter() {
-            assert_eq!(decode_reader(&mut Cursor::new(data.0)).unwrap(),
-                       (data.1, data.0.len() as u8));
-        }
-    }
-
-    #[test]
-    fn decode_reader_special() {
-        // Missing data is an error
-        assert_eq!(decode_reader(&mut Cursor::new([0b1000_0000]))
-                       .unwrap_err()
-                       .kind(),
-                   UnexpectedEof);
-    }
-
-    #[test]
-    fn encode_writer_data() {
-        for data in TESTDATA.iter() {
-            let mut writer = vec![];
-
-            assert_eq!(encode_writer(data.1, &mut writer).unwrap(),
-                       data.0.len() as u8);
-            assert_eq!(&writer[..data.0.len()], data.0);
-        }
-    }
-
-    #[test]
-    fn encode_writer_special() {
-        let mut buf = [];
-        assert_eq!(encode_writer(0, &mut Cursor::new(&mut buf[..]))
-                       .unwrap_err()
-                       .kind(),
-                   WriteZero);
-
-        let mut buf = [];
-        assert_eq!(encode_writer(128, &mut Cursor::new(&mut buf[..]))
-                       .unwrap_err()
-                       .kind(),
-                   WriteZero);
-
-        let mut buf = [42u8];
-        assert_eq!(encode_writer(128, &mut Cursor::new(&mut buf[..]))
-                       .unwrap_err()
-                       .kind(),
-                   WriteZero);
-    }
-
-    #[test]
-    fn decode_async_data() {
-        for data in TESTDATA.iter() {
-            let (_, decoded, len) =
-                block_on(decode(AllowStdIo::new(Cursor::new(data.0)), Decode::new())).unwrap();
-            assert_eq!(decoded, data.1);
-            assert_eq!(len, data.0.len());
-        }
-    }
-
-    #[test]
-    fn decode_async_special() {
-        // Missing data is an error
-        assert!(unexpected_eof_errors(AllowStdIo::new(Cursor::new([0b1000_0000])), Decode::new()));
-    }
-
-    #[test]
-    fn encode_async_data() {
-        for data in TESTDATA.iter() {
-            let (writer, len) = block_on(encode(AllowStdIo::new(vec![]), Encode::new(data.1)))
-                .unwrap();
-            assert_eq!(len, data.0.len());
-            assert_eq!(&writer.into_inner()[..data.0.len()], data.0);
-        }
-    }
-
-    #[test]
-    fn encode_async_special() {
-        let mut buf = [];
-        assert!(write_zero_errors(AllowStdIo::new(Cursor::new(&mut buf[..])), Encode::new(0)));
-
-        let mut buf = [];
-        assert!(write_zero_errors(AllowStdIo::new(Cursor::new(&mut buf[..])), Encode::new(128)));
-
-        let mut buf = [42u8];
-        assert!(write_zero_errors(AllowStdIo::new(Cursor::new(&mut buf[..])), Encode::new(128)));
-    }
-
-    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-    struct VarU64(u64);
-
-    // Ignores `g.size()` and generates u64s of arbitrary size.
-    impl Arbitrary for VarU64 {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            VarU64(g.next_u64())
-        }
-
-        fn shrink(&self) -> Box<Iterator<Item = Self>> {
-            Box::new(self.0.shrink().map(VarU64))
-        }
-    }
-
-    quickcheck! {
-        fn codec(buf_size: usize, read_ops: Vec<PartialOp>, write_ops: Vec<PartialOp>, int: VarU64) -> bool {
-            let mut read_ops = read_ops;
-            let mut write_ops = write_ops;
-            let (w, r) = ring_buffer(buf_size + 1);
-            let w = PartialWrite::new(w, write_ops.drain(..));
-            let r = PartialRead::new(r, read_ops.drain(..));
-
-            let test_outcome = test_codec_len(r, w, Decode::new(), Encode::new(int.0));
-            test_outcome.1 && VarU64(test_outcome.0) == int
-        }
-    }
+#[test]
+fn foo() {
+    println!("{:b}", !0b0110_0001_u8);
 }
