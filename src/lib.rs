@@ -30,7 +30,7 @@ pub fn encode(n: u64, out: &mut [u8]) -> usize {
         out[0] = n as u8;
         1
     } else if n < 256 {
-        out[0] = 249;
+        out[0] = 248;
         write_bytes(n, 1, &mut out[1..]);
         2
     } else if n < 65536 {
@@ -38,27 +38,27 @@ pub fn encode(n: u64, out: &mut [u8]) -> usize {
         write_bytes(n, 2, &mut out[1..]);
         3
     } else if n < 16777216 {
-        out[0] = 249;
+        out[0] = 250;
         write_bytes(n, 3, &mut out[1..]);
         4
     } else if n < 4294967296 {
-        out[0] = 249;
+        out[0] = 251;
         write_bytes(n, 4, &mut out[1..]);
         5
     } else if n < 1099511627776 {
-        out[0] = 249;
+        out[0] = 252;
         write_bytes(n, 5, &mut out[1..]);
         6
     } else if n < 281474976710656 {
-        out[0] = 249;
+        out[0] = 253;
         write_bytes(n, 6, &mut out[1..]);
         7
     } else if n < 72057594037927936 {
-        out[0] = 249;
+        out[0] = 254;
         write_bytes(n, 7, &mut out[1..]);
         8
     } else {
-        out[0] = 249;
+        out[0] = 255;
         write_bytes(n, 8, &mut out[1..]);
         9
     }
@@ -81,6 +81,10 @@ fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
 /// On error, this also returns how many bytes were read (including the erroneous byte). In case
 /// of noncanonical data (encodings that are valid except they are not the smallest possible
 /// encoding), the full data is parsed, even if the non-canonicty can be detected early on.
+///
+/// If there is not enough input data, an `UnexpectedEndOfInput` error is returned, never
+/// a `NonCanonical` error (even if the partial input could already be detected to be
+/// noncanonical).
 pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
     let first: u8;
     match input.get(0) {
@@ -89,9 +93,8 @@ pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
     }
 
     if (first | 0b0000_0111) == 0b1111_1111 {
-        // first five bytes are ones, value is less than 248
-        Ok((first as u64, 1))
-    } else {
+        // first five bytes are ones, value is 248 or more
+
         // Total length of the encoded data is 1 byte for the tag plus the value of
         // the three least sgnificant bits incremented by 1.
         let length = (first & 0b0000_0111) as usize + 2;
@@ -110,10 +113,14 @@ pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
         } else {
             return Ok((out, length));
         }
+    } else {
+        // value is less than 248
+        return Ok((first as u64, 1));
     }
 }
 
 /// Everything that can go wrong when decoding a varu64.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DecodeError {
     /// The encoding is not the shortest possible one for the number.
     /// Contains the encoded number.
@@ -122,7 +129,50 @@ pub enum DecodeError {
     UnexpectedEndOfInput,
 }
 
-#[test]
-fn foo() {
-    println!("{:b}", !0b0110_0001_u8);
+// TODO impl format and error
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Assert that the given u64 encodes to the expected encoding, and that the
+    // expected encoding decodes to the u64.
+    fn test_fixture(n: u64, exp: &[u8]) {
+        let mut foo = [0u8; 9];
+
+        let enc_len = encode(n, &mut foo[..]);
+        assert_eq!(&foo[..enc_len], exp);
+
+        let (dec, dec_len) = decode(exp).unwrap();
+        assert_eq!(dec, n);
+        assert_eq!(dec_len, exp.len());
+    }
+
+    #[test]
+    fn fixtures() {
+        test_fixture(0, &[0]);
+        test_fixture(1, &[1]);
+        test_fixture(247, &[247]);
+        test_fixture(248, &[248, 248]);
+        test_fixture(255, &[248, 255]);
+        test_fixture(256, &[249, 1, 0]);
+        test_fixture(65535, &[249, 255, 255]);
+        test_fixture(65536, &[250, 1, 0, 0]);
+        test_fixture(72057594037927935, &[254, 255, 255, 255, 255, 255, 255, 255]);
+        test_fixture(72057594037927936, &[255, 1, 0, 0, 0, 0, 0, 0, 0]);
+
+        assert_eq!(decode(&[]).unwrap_err(),
+                   (DecodeError::UnexpectedEndOfInput, 0));
+        assert_eq!(decode(&[248]).unwrap_err(),
+                   (DecodeError::UnexpectedEndOfInput, 1));
+        assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
+                   (DecodeError::UnexpectedEndOfInput, 7));
+        assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5, 6]).unwrap_err(),
+                   (DecodeError::UnexpectedEndOfInput, 8));
+
+        assert_eq!(decode(&[248, 42]).unwrap_err(),
+                   (DecodeError::NonCanonical(42), 2));
+        assert_eq!(decode(&[249, 0, 42]).unwrap_err(),
+                   (DecodeError::NonCanonical(42), 3));
+    }
 }
