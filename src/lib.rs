@@ -1,3 +1,7 @@
+//! Implementation of the [varu64 format](https://github.com/AljoschaMeyer/varu64-rs) in rust.
+
+use std::{fmt, error};
+
 /// Return how many bytes the encoding of `n` will take up.
 pub fn encoding_length(n: u64) -> usize {
     if n < 248 {
@@ -89,7 +93,7 @@ pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
     let first: u8;
     match input.get(0) {
         Some(b) => first = *b,
-        None => return Err((DecodeError::UnexpectedEndOfInput, 0)),
+        None => return Err((UnexpectedEndOfInput, 0)),
     }
 
     if (first | 0b0000_0111) == 0b1111_1111 {
@@ -104,12 +108,12 @@ pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
             out <<= 8;
             match input.get(i) {
                 Some(b) => out += *b as u64,
-                None => return Err((DecodeError::UnexpectedEndOfInput, i)),
+                None => return Err((UnexpectedEndOfInput, i)),
             }
         }
 
         if length > encoding_length(out) {
-            return Err((DecodeError::NonCanonical(out), length));
+            return Err((NonCanonical(out), length));
         } else {
             return Ok((out, length));
         }
@@ -128,8 +132,18 @@ pub enum DecodeError {
     /// The slice contained less data than the encoding needs.
     UnexpectedEndOfInput,
 }
+use DecodeError::*;
 
-// TODO impl format and error
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> std::result::Result<(), fmt::Error> {
+        match self {
+            NonCanonical(n) => write!(f, "Invalid varu64: NonCanonical encoding of {}", n),
+            UnexpectedEndOfInput => write!(f, "Invalid varu64: Not enough bytes"),
+        }
+    }
+}
+
+impl error::Error for DecodeError {}
 
 #[cfg(test)]
 mod tests {
@@ -161,18 +175,14 @@ mod tests {
         test_fixture(72057594037927935, &[254, 255, 255, 255, 255, 255, 255, 255]);
         test_fixture(72057594037927936, &[255, 1, 0, 0, 0, 0, 0, 0, 0]);
 
-        assert_eq!(decode(&[]).unwrap_err(),
-                   (DecodeError::UnexpectedEndOfInput, 0));
-        assert_eq!(decode(&[248]).unwrap_err(),
-                   (DecodeError::UnexpectedEndOfInput, 1));
+        assert_eq!(decode(&[]).unwrap_err(), (UnexpectedEndOfInput, 0));
+        assert_eq!(decode(&[248]).unwrap_err(), (UnexpectedEndOfInput, 1));
         assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
-                   (DecodeError::UnexpectedEndOfInput, 7));
+                   (UnexpectedEndOfInput, 7));
         assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5, 6]).unwrap_err(),
-                   (DecodeError::UnexpectedEndOfInput, 8));
+                   (UnexpectedEndOfInput, 8));
 
-        assert_eq!(decode(&[248, 42]).unwrap_err(),
-                   (DecodeError::NonCanonical(42), 2));
-        assert_eq!(decode(&[249, 0, 42]).unwrap_err(),
-                   (DecodeError::NonCanonical(42), 3));
+        assert_eq!(decode(&[248, 42]).unwrap_err(), (NonCanonical(42), 2));
+        assert_eq!(decode(&[249, 0, 42]).unwrap_err(), (NonCanonical(42), 3));
     }
 }
