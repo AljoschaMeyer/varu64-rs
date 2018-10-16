@@ -31,4 +31,4 @@ Due to the canonicity requirement of only allowing the shortest possible encodin
 
 The cost for the simplicity and canonicty of this format are a (somewhat) large number of unused byte strings. On the plus side, these can be used as extension points.
 
-Related work: This has been inspired by the issues in the [multiformats varint](TODO) repository, in particular issues [#TODO](TODO) and [#TODO](TODO).
+Related work: This has been inspired by the issues in the [multiformats varint](https://github.com/multiformats/unsigned-varint) repository, in particular issues [#8](https://github.com/multiformats/unsigned-varint/issues/8) and [#12](https://github.com/multiformats/unsigned-varint/issues/12).
