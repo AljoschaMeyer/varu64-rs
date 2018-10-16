@@ -19,11 +19,11 @@ To decode a varu64, look at the first byte. If its value is below 248, the value
 
 Following the first byte are `length` many bytes. These bytes are the big-endian representation of the encoded number.
 
-Of all possible representation for a number that this scheme admits, the shortest one is its unique, valid encoding. Decoders must indicate an error if a value uses an encoding that is longer than necessary.
+Of all possible representations for a number that this scheme admits, the shortest one is its unique, valid encoding. Decoders must indicate an error if a value uses an encoding that is longer than necessary.
 
 ## Remarks/Properties
 
-Whether the first byte signifies a length can be efficiently checked by testing whether the first 5 bits are set to 1. In that case, the length itself is 1 plus the value of the last three bits.
+Whether the first byte signifies a length can be checked efficiently by testing whether the first 5 bits are set to 1. In that case, the length itself is 1 plus the value of the last three bits.
 
 The length of an encoded value can be determined by solely looking at the first byte.
 
