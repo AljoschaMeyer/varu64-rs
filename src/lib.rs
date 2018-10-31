@@ -79,7 +79,7 @@ fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
     }
 }
 
-/// Decode a `u64` from the `input` buffer, returning the number and how many bytes were read.
+/// Decode a `u64` from the `input` buffer, returning the number and the remaining bytes.
 ///
 /// # Errors
 /// On error, this also returns how many bytes were read (including the erroneous byte). In case
@@ -89,11 +89,11 @@ fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
 /// If there is not enough input data, an `UnexpectedEndOfInput` error is returned, never
 /// a `NonCanonical` error (even if the partial input could already be detected to be
 /// noncanonical).
-pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
+pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
     let first: u8;
     match input.get(0) {
         Some(b) => first = *b,
-        None => return Err((UnexpectedEndOfInput, 0)),
+        None => return Err((UnexpectedEndOfInput, input)),
     }
 
     if (first | 0b0000_0111) == 0b1111_1111 {
@@ -108,18 +108,18 @@ pub fn decode(input: &[u8]) -> Result<(u64, usize), (DecodeError, usize)> {
             out <<= 8;
             match input.get(i) {
                 Some(b) => out += *b as u64,
-                None => return Err((UnexpectedEndOfInput, i)),
+                None => return Err((UnexpectedEndOfInput, &input[i..])),
             }
         }
 
         if length > encoding_length(out) {
-            return Err((NonCanonical(out), length));
+            return Err((NonCanonical(out), &input[length..]));
         } else {
-            return Ok((out, length));
+            return Ok((out, &input[length..]));
         }
     } else {
         // value is less than 248
-        return Ok((first as u64, 1));
+        return Ok((first as u64, &input[1..]));
     }
 }
 
@@ -129,7 +129,7 @@ pub enum DecodeError {
     /// The encoding is not the shortest possible one for the number.
     /// Contains the encoded number.
     NonCanonical(u64),
-    /// The slice contained less data than the encoding needs.
+    /// The slice contains less data than the encoding needs.
     UnexpectedEndOfInput,
 }
 use DecodeError::*;
@@ -138,7 +138,7 @@ impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::result::Result<(), fmt::Error> {
         match self {
             NonCanonical(n) => write!(f, "Invalid varu64: NonCanonical encoding of {}", n),
-            UnexpectedEndOfInput => write!(f, "Invalid varu64: Not enough bytes"),
+            UnexpectedEndOfInput => write!(f, "Invalid varu64: Not enough input bytes"),
         }
     }
 }
@@ -157,9 +157,9 @@ mod tests {
         let enc_len = encode(n, &mut foo[..]);
         assert_eq!(&foo[..enc_len], exp);
 
-        let (dec, dec_len) = decode(exp).unwrap();
+        let (dec, tail) = decode(exp).unwrap();
         assert_eq!(dec, n);
-        assert_eq!(dec_len, exp.len());
+        assert_eq!(tail, &[][..]);
     }
 
     #[test]
@@ -175,14 +175,15 @@ mod tests {
         test_fixture(72057594037927935, &[254, 255, 255, 255, 255, 255, 255, 255]);
         test_fixture(72057594037927936, &[255, 1, 0, 0, 0, 0, 0, 0, 0]);
 
-        assert_eq!(decode(&[]).unwrap_err(), (UnexpectedEndOfInput, 0));
-        assert_eq!(decode(&[248]).unwrap_err(), (UnexpectedEndOfInput, 1));
+        assert_eq!(decode(&[]).unwrap_err(), (UnexpectedEndOfInput, &[][..]));
+        assert_eq!(decode(&[248]).unwrap_err(), (UnexpectedEndOfInput, &[][..]));
         assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
-                   (UnexpectedEndOfInput, 7));
+                   (UnexpectedEndOfInput, &[][..]));
         assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5, 6]).unwrap_err(),
-                   (UnexpectedEndOfInput, 8));
+                   (UnexpectedEndOfInput, &[][..]));
 
-        assert_eq!(decode(&[248, 42]).unwrap_err(), (NonCanonical(42), 2));
-        assert_eq!(decode(&[249, 0, 42]).unwrap_err(), (NonCanonical(42), 3));
+        assert_eq!(decode(&[248, 42]).unwrap_err(), (NonCanonical(42), &[][..]));
+        assert_eq!(decode(&[249, 0, 42]).unwrap_err(),
+                   (NonCanonical(42), &[][..]));
     }
 }
