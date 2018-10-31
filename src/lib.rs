@@ -1,6 +1,6 @@
 //! Implementation of the [varu64 format](https://github.com/AljoschaMeyer/varu64-rs) in rust.
 
-use std::{fmt, error};
+use std::{fmt, error, io};
 
 /// Return how many bytes the encoding of `n` will take up.
 pub fn encoding_length(n: u64) -> usize {
@@ -66,6 +66,13 @@ pub fn encode(n: u64, out: &mut [u8]) -> usize {
         write_bytes(n, 8, &mut out[1..]);
         9
     }
+}
+
+/// Encodes `n` into the writer, returning how many bytes have been written.
+pub fn encode_write<W: io::Write>(n: u64, mut w: W) -> Result<usize, io::Error> {
+    let mut tmp = [0u8; 9];
+    let written = encode(n, &mut tmp[..]);
+    w.write_all(&tmp[..written]).map(|_| written)
 }
 
 // Write the k least significant bytes of n into out, in big-endian byteorder, panicking
