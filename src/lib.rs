@@ -1,6 +1,12 @@
 //! Implementation of the [varu64 format](https://github.com/AljoschaMeyer/varu64-rs) in rust.
 
+#[cfg(test)]
+#[macro_use]
+extern crate quickcheck;
+
 use std::{fmt, error, io};
+
+pub mod nb;
 
 /// Return how many bytes the encoding of `n` will take up.
 pub fn encoding_length(n: u64) -> usize {
@@ -91,7 +97,7 @@ fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
 /// # Errors
 /// On error, this also returns how many bytes were read (including the erroneous byte). In case
 /// of noncanonical data (encodings that are valid except they are not the smallest possible
-/// encoding), the full data is parsed, even if the non-canonicty can be detected early on.
+/// encoding), the full data is parsed, even if the non-canonicty could be detected early on.
 ///
 /// If there is not enough input data, an `UnexpectedEndOfInput` error is returned, never
 /// a `NonCanonical` error (even if the partial input could already be detected to be
