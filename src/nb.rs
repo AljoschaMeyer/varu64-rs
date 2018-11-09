@@ -1,5 +1,7 @@
 //! Nonblocking encoding and decoding.
 
+use std::cmp::min;
+
 use super::encoding_length;
 
 /// Everything that can go wrong when decoding data.
@@ -27,7 +29,7 @@ impl Decoder {
 
     /// Decode a VarU64 from the input. The decoder can be reused as many times as you want.
     ///
-    /// Returns how many bytes have been written. A `None` is returned if more input is needed.
+    /// Returns how many bytes have been read. A `None` is returned if more input is needed.
     pub fn decode(&mut self, input: &[u8]) -> (usize, Option<Result<u64, DecodeError>>) {
         self.do_decode(input, 0)
     }
@@ -216,6 +218,68 @@ impl Encoder {
     }
 }
 
+/// State for decoding a VarU64 followed by that many bytes into a `Vec<u8>`.
+pub struct LengthValueDecoder(_LengthValueDecoder, Option<Vec<u8>>);
+
+enum _LengthValueDecoder {
+    Length(Decoder),
+    Value(u64),
+}
+
+// The maximum capacity of the byte vector to preallocate. Even if malicious input claims
+// a longer value, only this much memory will be blindly allocated.
+static MAX_ALLOC: usize = 2048;
+
+impl LengthValueDecoder {
+    pub fn new() -> LengthValueDecoder {
+        LengthValueDecoder(_LengthValueDecoder::Length(Decoder::new()),
+                           Some(Vec::new()))
+    }
+
+    /// Decode a VarU64 from the input, then reads that many bytes into a `Vec<u8>`.
+    ///
+    /// Returns how many bytes have been read. A `None` is returned if more input is needed.
+    pub fn decode(&mut self, mut input: &[u8]) -> (usize, Option<Result<Vec<u8>, DecodeError>>) {
+        let mut total_amount = 0;
+        loop {
+            self.0 = match self.0 {
+                _LengthValueDecoder::Length(ref mut dec) => {
+                    match dec.decode(input) {
+                        (amount, None) => return (total_amount + amount, None),
+                        (amount, Some(Err(err))) => return (total_amount + amount, Some(Err(err))),
+                        (amount, Some(Ok(len))) => {
+                            total_amount += amount;
+                            self.1
+                                .as_mut()
+                                .unwrap()
+                                .reserve(min(MAX_ALLOC, len as usize));
+                            input = &input[amount..];
+                            _LengthValueDecoder::Value(len)
+                        }
+                    }
+                }
+
+                _LengthValueDecoder::Value(len) => {
+                    if input.len() == 0 {
+                        return (total_amount, None);
+                    } else if self.1.as_mut().unwrap().len() as u64 == len {
+                        return (total_amount, Some(Ok(self.1.take().unwrap())));
+                    } else {
+                        let amount = min(len as usize, input.len());
+                        self.1
+                            .as_mut()
+                            .unwrap()
+                            .extend_from_slice(&input[..amount]);
+                        total_amount += amount;
+                        input = &input[amount..];
+                        _LengthValueDecoder::Value(len)
+                    }
+                }
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -250,9 +314,9 @@ mod tests {
                       assert_eq!(consumed, data.len() - tail.len());
                   }
 
-                  Err((err, tail)) => {
+                  Err((_err, tail)) => {
                       let (consumed, tmp) = decode_all(&data, &mut dec, chunk_size as usize);
-                      let nb_err = tmp.unwrap_err().unwrap();
+                      let _nb_err = tmp.unwrap_err().unwrap();
                       assert_eq!(consumed, data.len() - tail.len());
                   }
 
@@ -260,7 +324,7 @@ mod tests {
                       let (consumed, tmp) = decode_all(&data, &mut dec, (chunk_size as usize) + 1);
                       let nb_decoded = tmp.unwrap();
                       assert_eq!(nb_decoded, decoded);
-                      assert_eq!(consumed, data.len() -tail.len())
+                      assert_eq!(consumed, data.len() - tail.len())
                   }
               }
 
@@ -305,4 +369,60 @@ mod tests {
             true
         }
     }
+
+    fn length_value_decode_all(data: &[u8],
+                               dec: &mut super::LengthValueDecoder,
+                               chunk_size: usize)
+                               -> (usize, Result<Vec<u8>, Option<super::DecodeError>>) {
+        let mut consumed = 0;
+
+        for chunk in data.chunks(chunk_size) {
+            match dec.decode(chunk) {
+                (eaten, None) => consumed += eaten,
+                (eaten, Some(Ok(decoded))) => {
+                    return (consumed + eaten, Ok(decoded));
+                }
+                (eaten, Some(Err(e))) => return (consumed + eaten, Err(Some(e))),
+            }
+        }
+
+        return (consumed, Err(None));
+    }
+
+    quickcheck! {
+          fn test_length_value_decoder(data: Vec<u8>, chunk_size: u8) -> bool {
+              let mut dec = super::LengthValueDecoder::new();
+
+              match decode(&data) {
+                  Err((DecodeError::UnexpectedEndOfInput, tail)) => {
+                      let (consumed, tmp) = length_value_decode_all(&data, &mut dec, chunk_size as usize);
+                      assert!(tmp.unwrap_err().is_none());
+                      assert_eq!(consumed, data.len() - tail.len());
+                  }
+
+                  Err((_err, tail)) => {
+                      let (consumed, tmp) = length_value_decode_all(&data, &mut dec, chunk_size as usize);
+                      let _nb_err = tmp.unwrap_err().unwrap();
+                      assert_eq!(consumed, data.len() - tail.len());
+                  }
+
+                  Ok((decoded, tail)) => {
+                      let (consumed, tmp) = length_value_decode_all(&data, &mut dec, (chunk_size as usize) + 1);
+
+                      if tail.len() < consumed as usize {
+                          assert!(tmp.unwrap_err().is_none());
+                          return true;
+                      }
+
+                      let nb_decoded = tmp.unwrap();
+
+                      let int_len = data.len() - tail.len();
+                      assert_eq!(&nb_decoded[..], &tail[..(decoded as usize)]);
+                      assert_eq!(consumed, int_len + (decoded as usize))
+                  }
+              }
+
+              true
+          }
+      }
 }
