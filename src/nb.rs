@@ -280,6 +280,64 @@ impl LengthValueDecoder {
     }
 }
 
+/// State for encoding some bytes, preceded by a VarU64 indicating their length
+pub struct LengthValueEncoder<T>(_LengthValueEncoder, T);
+
+enum _LengthValueEncoder {
+    Length(Encoder),
+    Value(usize),
+}
+
+impl<T: AsRef<[u8]>> LengthValueEncoder<T> {
+    /// Create an encoder for encoding the given bytes.
+    pub fn new(bytes: T) -> LengthValueEncoder<T> {
+        let len = bytes.as_ref().len() as u64;
+        LengthValueEncoder(_LengthValueEncoder::Length(Encoder::new(len)), bytes)
+    }
+
+    /// Encode (potentially only parts of) the bytes into the output buffer. This returns how
+    /// many bytes were written. If it returns zero even though the `out` buffer had non-zero
+    /// length, the encoding process is done.
+    pub fn encode(&mut self, out: &mut [u8]) -> usize {
+        let len = self.1.as_ref().len();
+        let mut total_written = 0;
+
+        loop {
+            if out.len() == 0 {
+                return 0;
+            }
+
+            if total_written == out.len() {
+                return total_written;
+            }
+
+            self.0 = match self.0 {
+                _LengthValueEncoder::Length(ref mut enc) => {
+                    let enc_written = enc.encode(out);
+                    if enc_written == 0 {
+                        _LengthValueEncoder::Value(0)
+                    } else {
+                        return enc_written;
+                    }
+                }
+
+                _LengthValueEncoder::Value(already_written) => {
+                    if already_written == len {
+                        return total_written;
+                    }
+
+                    let newly_written = min(len - already_written, out.len());
+                    (&mut out[..newly_written]).copy_from_slice(&self.1.as_ref()[already_written..
+                                                                 already_written +
+                                                                 newly_written]);
+                    total_written += newly_written;
+                    _LengthValueEncoder::Value(already_written + newly_written)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -421,6 +479,49 @@ mod tests {
                       assert_eq!(consumed, int_len + (decoded as usize))
                   }
               }
+
+              true
+          }
+      }
+
+      fn length_value_encode_all<'a, I: Iterator<Item = &'a mut [u8]>, T: AsRef<[u8]>>(enc: &mut super::LengthValueEncoder<T>, outs: &mut I)
+-> usize{
+        let mut total_written = 0;
+
+        for out in outs {
+            let written = enc.encode(out);
+            assert!(written <= out.len());
+            if written == 0 {
+                return total_written;
+            } else {
+                total_written += written;
+                total_written += enc.encode(&mut out[written..]);
+            }
+        }
+
+        if enc.encode(&mut [42]) == 0 {
+            return total_written;
+        } else {
+            panic!();
+        }
+    }
+
+    quickcheck! {
+          fn test_length_value_encoder(val: Vec<u8>, chunk_size: u8) -> bool {
+              let mut enc = super::LengthValueEncoder::new(&val);
+
+              let mut buf = Vec::new();
+              buf.resize(9, 43);
+              let mut nb_buf = Vec::new();
+              nb_buf.resize(val.len() + 9, 44);
+
+              let written = encode(val.len() as u64, &mut buf);
+              buf.truncate(written);
+              buf.extend_from_slice(&val);
+              let nb_written = length_value_encode_all(&mut enc, &mut nb_buf.chunks_mut((chunk_size as usize) + 1));
+
+              assert_eq!(nb_written, written + val.len());
+              assert_eq!(&nb_buf[..nb_written], &buf[..nb_written]);
 
               true
           }
