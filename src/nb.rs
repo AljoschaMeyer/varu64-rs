@@ -280,6 +280,93 @@ impl LengthValueDecoder {
     }
 }
 
+/// Everything that can go wrong when decoding a length-value with a limit.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub enum DecodeLimitError {
+    /// The input was not encoded canonically.
+    NonCanonical,
+    /// The length exceeded the limit.
+    Limit { limit: u64, actual: u64 },
+}
+
+impl From<DecodeError> for DecodeLimitError {
+    fn from(e: DecodeError) -> DecodeLimitError {
+        match e {
+            DecodeError::NonCanonical => DecodeLimitError::NonCanonical,
+        }
+    }
+}
+
+/// State for decoding a VarU64 followed by that many bytes into a `Vec<u8>`, erroring if
+/// the VarU64 is greater than a limit.
+pub struct LengthValueLimitDecoder(_LengthValueLimitDecoder, Option<Vec<u8>>);
+
+enum _LengthValueLimitDecoder {
+    Length(Decoder, u64),
+    Value(u64),
+}
+
+impl LengthValueLimitDecoder {
+    /// Create a new `LengthValueLimitDecoder`, only accepting values up to length `limit`.
+    pub fn new(limit: u64) -> LengthValueLimitDecoder {
+        LengthValueLimitDecoder(_LengthValueLimitDecoder::Length(Decoder::new(), limit),
+                                Some(Vec::new()))
+    }
+
+    /// Decode a VarU64 from the input, then reads that many bytes into a `Vec<u8>`.
+    ///
+    /// Returns how many bytes have been read. A `None` is returned if more input is needed.
+    pub fn decode(&mut self,
+                  mut input: &[u8])
+                  -> (usize, Option<Result<Vec<u8>, DecodeLimitError>>) {
+        let mut total_amount = 0;
+        loop {
+            self.0 = match self.0 {
+                _LengthValueLimitDecoder::Length(ref mut dec, limit) => {
+                    match dec.decode(input) {
+                        (amount, None) => return (total_amount + amount, None),
+                        (amount, Some(Err(err))) => {
+                            return (total_amount + amount, Some(Err(err.into())))
+                        }
+                        (amount, Some(Ok(len))) => {
+                            total_amount += amount;
+
+                            if len > limit {
+                                return (total_amount,
+                                        Some(Err(DecodeLimitError::Limit { limit, actual: len })));
+                            }
+
+                            self.1
+                                .as_mut()
+                                .unwrap()
+                                .reserve(min(MAX_ALLOC, len as usize));
+                            input = &input[amount..];
+                            _LengthValueLimitDecoder::Value(len)
+                        }
+                    }
+                }
+
+                _LengthValueLimitDecoder::Value(len) => {
+                    if input.len() == 0 {
+                        return (total_amount, None);
+                    } else if self.1.as_mut().unwrap().len() as u64 == len {
+                        return (total_amount, Some(Ok(self.1.take().unwrap())));
+                    } else {
+                        let amount = min(len as usize, input.len());
+                        self.1
+                            .as_mut()
+                            .unwrap()
+                            .extend_from_slice(&input[..amount]);
+                        total_amount += amount;
+                        input = &input[amount..];
+                        _LengthValueLimitDecoder::Value(len)
+                    }
+                }
+            };
+        }
+    }
+}
+
 /// State for encoding some bytes, preceded by a VarU64 indicating their length
 pub struct LengthValueEncoder<T>(_LengthValueEncoder, T);
 
