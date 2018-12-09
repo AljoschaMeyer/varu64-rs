@@ -24,8 +24,15 @@ Of all possible representations for a number that this scheme admits, the shorte
 ## Remarks/Properties
 
 Whether the first byte signifies a length can be checked efficiently by testing whether the first 5 bits are set to 1. In that case, the length itself is 1 plus the value of the last three bits.
+In other words `additional_bytes = (first_byte & 0xf8 == 0xf8) ? (first_byte & 7) + 1 : 0`.
 
 The length of an encoded value can be determined by solely looking at the first byte.
+
+The canonical encoding means that if there are >= 2 additional bytes,
+then there may be no leading zero bytes. If there is just one
+additional bytes, then the additional byte must be >= 248.
+That means 0-247 is encoded in one byte, but 248-255 is encoded in
+two bytes.
 
 Due to the canonicity requirement of only allowing the shortest possible encoding, there is a bijection between unsigned 64 bit integers and encodings.
 
@@ -36,3 +43,4 @@ Related work: This has been inspired by the issues in the [multiformats varint](
 ## License
 
 The specification (this file) is licensed as [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), the code in this repository is licensed under [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html)
+
