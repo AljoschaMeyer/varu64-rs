@@ -23,20 +23,15 @@ Of all possible representations for a number that this scheme admits, the shorte
 
 ## Remarks/Properties
 
-Whether the first byte signifies a length can be checked efficiently by testing whether the first 5 bits are set to 1. In that case, the length itself is 1 plus the value of the last three bits.
-In other words `additional_bytes = (first_byte & 0xf8 == 0xf8) ? (first_byte & 7) + 1 : 0`.
+Whether the first byte signifies a length can be checked efficiently by testing whether the first 5 bits are set to 1. In that case, the length itself is 1 plus the value of the last three bits. In other words, `additional_bytes = (first_byte & 0xf8 == 0xf8) ? (first_byte & 7) + 1 : 0`.
 
 The length of an encoded value can be determined by solely looking at the first byte.
 
-The canonical encoding means that if there are >= 2 additional bytes,
-then there may be no leading zero bytes. If there is just one
-additional bytes, then the additional byte must be >= 248.
-That means 0-247 is encoded in one byte, but 248-255 is encoded in
-two bytes.
+The canonical encoding means that if there are two or more additional bytes, then there may be no leading zero bytes. If there is just one additional byte, then the additional byte must be >= 248. That means 0-247 is encoded in one byte, but 248-255 is encoded in two bytes.
 
 Due to the canonicity requirement of only allowing the shortest possible encoding, there is a bijection between unsigned 64 bit integers and encodings.
 
-The cost for the simplicity and canonicty of this format are a (somewhat) large number of unused byte strings. On the plus side, these can be used as extension points.
+The cost for the simplicity and canonicity of this format are a (somewhat) large number of unused byte strings. On the plus side, these can be used as extension points.
 
 Related work: This has been inspired by the issues in the [multiformats varint](https://github.com/multiformats/unsigned-varint) repository, in particular issues [#8](https://github.com/multiformats/unsigned-varint/issues/8) and [#12](https://github.com/multiformats/unsigned-varint/issues/12).
 
