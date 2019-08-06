@@ -1,11 +1,13 @@
 //! Implementation of the [varu64 format](https://github.com/AljoschaMeyer/varu64-rs) in rust.
-
+#![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(test)]
 #[macro_use]
 extern crate quickcheck;
 
-use std::{fmt, error, io};
+#[cfg(feature = "std")]
+use std::{error, fmt, io};
 
+#[cfg(feature = "std")]
 pub mod nb;
 
 /// Return how many bytes the encoding of `n` will take up.
@@ -75,6 +77,7 @@ pub fn encode(n: u64, out: &mut [u8]) -> usize {
 }
 
 /// Encodes `n` into the writer, returning how many bytes have been written.
+#[cfg(feature = "std")]
 pub fn encode_write<W: io::Write>(n: u64, mut w: W) -> Result<usize, io::Error> {
     let mut tmp = [0u8; 9];
     let written = encode(n, &mut tmp[..]);
@@ -86,7 +89,7 @@ pub fn encode_write<W: io::Write>(n: u64, mut w: W) -> Result<usize, io::Error> 
 //
 // k must be smaller than 8.
 fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
-    let bytes: [u8; 8] = unsafe { std::mem::transmute(u64::to_be(n)) };
+    let bytes: [u8; 8] = unsafe { core::mem::transmute(u64::to_be(n)) };
     for i in 0..k {
         out[i] = bytes[(8 - k) + i];
     }
@@ -147,6 +150,7 @@ pub enum DecodeError {
 }
 use DecodeError::*;
 
+#[cfg(feature = "std")]
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::result::Result<(), fmt::Error> {
         match self {
@@ -156,6 +160,7 @@ impl fmt::Display for DecodeError {
     }
 }
 
+#[cfg(feature = "std")]
 impl error::Error for DecodeError {}
 
 #[cfg(test)]
@@ -190,13 +195,19 @@ mod tests {
 
         assert_eq!(decode(&[]).unwrap_err(), (UnexpectedEndOfInput, &[][..]));
         assert_eq!(decode(&[248]).unwrap_err(), (UnexpectedEndOfInput, &[][..]));
-        assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
-                   (UnexpectedEndOfInput, &[][..]));
-        assert_eq!(decode(&[255, 0, 1, 2, 3, 4, 5, 6]).unwrap_err(),
-                   (UnexpectedEndOfInput, &[][..]));
+        assert_eq!(
+            decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
+            (UnexpectedEndOfInput, &[][..])
+        );
+        assert_eq!(
+            decode(&[255, 0, 1, 2, 3, 4, 5, 6]).unwrap_err(),
+            (UnexpectedEndOfInput, &[][..])
+        );
 
         assert_eq!(decode(&[248, 42]).unwrap_err(), (NonCanonical(42), &[][..]));
-        assert_eq!(decode(&[249, 0, 42]).unwrap_err(),
-                   (NonCanonical(42), &[][..]));
+        assert_eq!(
+            decode(&[249, 0, 42]).unwrap_err(),
+            (NonCanonical(42), &[][..])
+        );
     }
 }
