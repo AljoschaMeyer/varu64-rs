@@ -13,9 +13,9 @@ pub enum DecodeError {
 
 /// State for the nonblocking decoding.
 pub struct Decoder {
-    val: u64, // This accumulates parsed data until it contains the correct value.
+    val: u64,            // This accumulates parsed data until it contains the correct value.
     total_length: usize, // How many bytes does this varu64 take up in total? A value of 0 indicates the initial state.
-    parsed: usize, // How many bytes have we parsed already?
+    parsed: usize,       // How many bytes have we parsed already?
 }
 
 impl Decoder {
@@ -34,10 +34,11 @@ impl Decoder {
         self.do_decode(input, 0)
     }
 
-    pub fn do_decode(&mut self,
-                     input: &[u8],
-                     total_consumed: usize)
-                     -> (usize, Option<Result<u64, DecodeError>>) {
+    pub fn do_decode(
+        &mut self,
+        input: &[u8],
+        total_consumed: usize,
+    ) -> (usize, Option<Result<u64, DecodeError>>) {
         if input.len() == 0 {
             return (0, None);
         }
@@ -126,7 +127,7 @@ impl Decoder {
 
 /// State for the nonblocking encoding.
 pub struct Encoder {
-    n: u64, // What to encode (or what remains of it).
+    n: u64,           // What to encode (or what remains of it).
     remaining: usize, // How many bytes do we still need to output? `9` signals that none have been output yet.
 }
 
@@ -232,8 +233,10 @@ static MAX_ALLOC: usize = 2048;
 
 impl LengthValueDecoder {
     pub fn new() -> LengthValueDecoder {
-        LengthValueDecoder(_LengthValueDecoder::Length(Decoder::new()),
-                           Some(Vec::new()))
+        LengthValueDecoder(
+            _LengthValueDecoder::Length(Decoder::new()),
+            Some(Vec::new()),
+        )
     }
 
     /// Decode a VarU64 from the input, then reads that many bytes into a `Vec<u8>`.
@@ -243,21 +246,19 @@ impl LengthValueDecoder {
         let mut total_amount = 0;
         loop {
             self.0 = match self.0 {
-                _LengthValueDecoder::Length(ref mut dec) => {
-                    match dec.decode(input) {
-                        (amount, None) => return (total_amount + amount, None),
-                        (amount, Some(Err(err))) => return (total_amount + amount, Some(Err(err))),
-                        (amount, Some(Ok(len))) => {
-                            total_amount += amount;
-                            self.1
-                                .as_mut()
-                                .unwrap()
-                                .reserve(min(MAX_ALLOC, len as usize));
-                            input = &input[amount..];
-                            _LengthValueDecoder::Value(len)
-                        }
+                _LengthValueDecoder::Length(ref mut dec) => match dec.decode(input) {
+                    (amount, None) => return (total_amount + amount, None),
+                    (amount, Some(Err(err))) => return (total_amount + amount, Some(Err(err))),
+                    (amount, Some(Ok(len))) => {
+                        total_amount += amount;
+                        self.1
+                            .as_mut()
+                            .unwrap()
+                            .reserve(min(MAX_ALLOC, len as usize));
+                        input = &input[amount..];
+                        _LengthValueDecoder::Value(len)
                     }
-                }
+                },
 
                 _LengthValueDecoder::Value(len) => {
                     if input.len() == 0 {
@@ -266,10 +267,7 @@ impl LengthValueDecoder {
                         return (total_amount, Some(Ok(self.1.take().unwrap())));
                     } else {
                         let amount = min(len as usize, input.len());
-                        self.1
-                            .as_mut()
-                            .unwrap()
-                            .extend_from_slice(&input[..amount]);
+                        self.1.as_mut().unwrap().extend_from_slice(&input[..amount]);
                         total_amount += amount;
                         input = &input[amount..];
                         _LengthValueDecoder::Value(len)
@@ -309,42 +307,45 @@ enum _LengthValueLimitDecoder {
 impl LengthValueLimitDecoder {
     /// Create a new `LengthValueLimitDecoder`, only accepting values up to length `limit`.
     pub fn new(limit: u64) -> LengthValueLimitDecoder {
-        LengthValueLimitDecoder(_LengthValueLimitDecoder::Length(Decoder::new(), limit),
-                                Some(Vec::new()))
+        LengthValueLimitDecoder(
+            _LengthValueLimitDecoder::Length(Decoder::new(), limit),
+            Some(Vec::new()),
+        )
     }
 
     /// Decode a VarU64 from the input, then reads that many bytes into a `Vec<u8>`.
     ///
     /// Returns how many bytes have been read. A `None` is returned if more input is needed.
-    pub fn decode(&mut self,
-                  mut input: &[u8])
-                  -> (usize, Option<Result<Vec<u8>, DecodeLimitError>>) {
+    pub fn decode(
+        &mut self,
+        mut input: &[u8],
+    ) -> (usize, Option<Result<Vec<u8>, DecodeLimitError>>) {
         let mut total_amount = 0;
         loop {
             self.0 = match self.0 {
-                _LengthValueLimitDecoder::Length(ref mut dec, limit) => {
-                    match dec.decode(input) {
-                        (amount, None) => return (total_amount + amount, None),
-                        (amount, Some(Err(err))) => {
-                            return (total_amount + amount, Some(Err(err.into())))
-                        }
-                        (amount, Some(Ok(len))) => {
-                            total_amount += amount;
-
-                            if len > limit {
-                                return (total_amount,
-                                        Some(Err(DecodeLimitError::Limit { limit, actual: len })));
-                            }
-
-                            self.1
-                                .as_mut()
-                                .unwrap()
-                                .reserve(min(MAX_ALLOC, len as usize));
-                            input = &input[amount..];
-                            _LengthValueLimitDecoder::Value(len)
-                        }
+                _LengthValueLimitDecoder::Length(ref mut dec, limit) => match dec.decode(input) {
+                    (amount, None) => return (total_amount + amount, None),
+                    (amount, Some(Err(err))) => {
+                        return (total_amount + amount, Some(Err(err.into())))
                     }
-                }
+                    (amount, Some(Ok(len))) => {
+                        total_amount += amount;
+
+                        if len > limit {
+                            return (
+                                total_amount,
+                                Some(Err(DecodeLimitError::Limit { limit, actual: len })),
+                            );
+                        }
+
+                        self.1
+                            .as_mut()
+                            .unwrap()
+                            .reserve(min(MAX_ALLOC, len as usize));
+                        input = &input[amount..];
+                        _LengthValueLimitDecoder::Value(len)
+                    }
+                },
 
                 _LengthValueLimitDecoder::Value(len) => {
                     if input.len() == 0 {
@@ -353,10 +354,7 @@ impl LengthValueLimitDecoder {
                         return (total_amount, Some(Ok(self.1.take().unwrap())));
                     } else {
                         let amount = min(len as usize, input.len());
-                        self.1
-                            .as_mut()
-                            .unwrap()
-                            .extend_from_slice(&input[..amount]);
+                        self.1.as_mut().unwrap().extend_from_slice(&input[..amount]);
                         total_amount += amount;
                         input = &input[amount..];
                         _LengthValueLimitDecoder::Value(len)
@@ -414,9 +412,9 @@ impl<T: AsRef<[u8]>> LengthValueEncoder<T> {
                     }
 
                     let newly_written = min(len - already_written, out.len());
-                    (&mut out[..newly_written]).copy_from_slice(&self.1.as_ref()[already_written..
-                                                                 already_written +
-                                                                 newly_written]);
+                    (&mut out[..newly_written]).copy_from_slice(
+                        &self.1.as_ref()[already_written..already_written + newly_written],
+                    );
                     total_written += newly_written;
                     _LengthValueEncoder::Value(already_written + newly_written)
                 }
@@ -429,10 +427,11 @@ impl<T: AsRef<[u8]>> LengthValueEncoder<T> {
 mod tests {
     use super::super::*;
 
-    fn decode_all(data: &[u8],
-                  dec: &mut super::Decoder,
-                  chunk_size: usize)
-                  -> (usize, Result<u64, Option<super::DecodeError>>) {
+    fn decode_all(
+        data: &[u8],
+        dec: &mut super::Decoder,
+        chunk_size: usize,
+    ) -> (usize, Result<u64, Option<super::DecodeError>>) {
         let mut consumed = 0;
 
         for chunk in data.chunks(chunk_size) {
@@ -449,37 +448,38 @@ mod tests {
     }
 
     quickcheck! {
-          fn test_decoder(data: Vec<u8>, chunk_size: u8) -> bool {
-              let mut dec = super::Decoder::new();
+        fn test_decoder(data: Vec<u8>, chunk_size: u8) -> bool {
+            let mut dec = super::Decoder::new();
 
-              match decode(&data) {
-                  Err((DecodeError::UnexpectedEndOfInput, tail)) => {
-                      let (consumed, tmp) = decode_all(&data, &mut dec, chunk_size as usize);
-                      assert!(tmp.unwrap_err().is_none());
-                      assert_eq!(consumed, data.len() - tail.len());
-                  }
+            match decode(&data) {
+                Err((DecodeError::UnexpectedEndOfInput, tail)) => {
+                    let (consumed, tmp) = decode_all(&data, &mut dec, chunk_size as usize);
+                    assert!(tmp.unwrap_err().is_none());
+                    assert_eq!(consumed, data.len() - tail.len());
+                }
 
-                  Err((_err, tail)) => {
-                      let (consumed, tmp) = decode_all(&data, &mut dec, chunk_size as usize);
-                      let _nb_err = tmp.unwrap_err().unwrap();
-                      assert_eq!(consumed, data.len() - tail.len());
-                  }
+                Err((_err, tail)) => {
+                    let (consumed, tmp) = decode_all(&data, &mut dec, chunk_size as usize);
+                    let _nb_err = tmp.unwrap_err().unwrap();
+                    assert_eq!(consumed, data.len() - tail.len());
+                }
 
-                  Ok((decoded, tail)) => {
-                      let (consumed, tmp) = decode_all(&data, &mut dec, (chunk_size as usize) + 1);
-                      let nb_decoded = tmp.unwrap();
-                      assert_eq!(nb_decoded, decoded);
-                      assert_eq!(consumed, data.len() - tail.len())
-                  }
-              }
+                Ok((decoded, tail)) => {
+                    let (consumed, tmp) = decode_all(&data, &mut dec, (chunk_size as usize) + 1);
+                    let nb_decoded = tmp.unwrap();
+                    assert_eq!(nb_decoded, decoded);
+                    assert_eq!(consumed, data.len() - tail.len())
+                }
+            }
 
-              true
-          }
-      }
+            true
+        }
+    }
 
-    fn encode_all<'a, I: Iterator<Item = &'a mut [u8]>>(enc: &mut super::Encoder,
-                                                        outs: &mut I)
-                                                        -> usize {
+    fn encode_all<'a, I: Iterator<Item = &'a mut [u8]>>(
+        enc: &mut super::Encoder,
+        outs: &mut I,
+    ) -> usize {
         let mut total_written = 0;
 
         for out in outs {
@@ -515,10 +515,11 @@ mod tests {
         }
     }
 
-    fn length_value_decode_all(data: &[u8],
-                               dec: &mut super::LengthValueDecoder,
-                               chunk_size: usize)
-                               -> (usize, Result<Vec<u8>, Option<super::DecodeError>>) {
+    fn length_value_decode_all(
+        data: &[u8],
+        dec: &mut super::LengthValueDecoder,
+        chunk_size: usize,
+    ) -> (usize, Result<Vec<u8>, Option<super::DecodeError>>) {
         let mut consumed = 0;
 
         for chunk in data.chunks(chunk_size) {
@@ -535,44 +536,46 @@ mod tests {
     }
 
     quickcheck! {
-          fn test_length_value_decoder(data: Vec<u8>, chunk_size: u8) -> bool {
-              let mut dec = super::LengthValueDecoder::new();
+        fn test_length_value_decoder(data: Vec<u8>, chunk_size: u8) -> bool {
+            let mut dec = super::LengthValueDecoder::new();
 
-              match decode(&data) {
-                  Err((DecodeError::UnexpectedEndOfInput, tail)) => {
-                      let (consumed, tmp) = length_value_decode_all(&data, &mut dec, chunk_size as usize);
-                      assert!(tmp.unwrap_err().is_none());
-                      assert_eq!(consumed, data.len() - tail.len());
-                  }
+            match decode(&data) {
+                Err((DecodeError::UnexpectedEndOfInput, tail)) => {
+                    let (consumed, tmp) = length_value_decode_all(&data, &mut dec, chunk_size as usize);
+                    assert!(tmp.unwrap_err().is_none());
+                    assert_eq!(consumed, data.len() - tail.len());
+                }
 
-                  Err((_err, tail)) => {
-                      let (consumed, tmp) = length_value_decode_all(&data, &mut dec, chunk_size as usize);
-                      let _nb_err = tmp.unwrap_err().unwrap();
-                      assert_eq!(consumed, data.len() - tail.len());
-                  }
+                Err((_err, tail)) => {
+                    let (consumed, tmp) = length_value_decode_all(&data, &mut dec, chunk_size as usize);
+                    let _nb_err = tmp.unwrap_err().unwrap();
+                    assert_eq!(consumed, data.len() - tail.len());
+                }
 
-                  Ok((decoded, tail)) => {
-                      let (consumed, tmp) = length_value_decode_all(&data, &mut dec, (chunk_size as usize) + 1);
+                Ok((decoded, tail)) => {
+                    let (consumed, tmp) = length_value_decode_all(&data, &mut dec, (chunk_size as usize) + 1);
 
-                      if tail.len() < consumed as usize {
-                          assert!(tmp.unwrap_err().is_none());
-                          return true;
-                      }
+                    if tail.len() < consumed as usize {
+                        assert!(tmp.unwrap_err().is_none());
+                        return true;
+                    }
 
-                      let nb_decoded = tmp.unwrap();
+                    let nb_decoded = tmp.unwrap();
 
-                      let int_len = data.len() - tail.len();
-                      assert_eq!(&nb_decoded[..], &tail[..(decoded as usize)]);
-                      assert_eq!(consumed, int_len + (decoded as usize))
-                  }
-              }
+                    let int_len = data.len() - tail.len();
+                    assert_eq!(&nb_decoded[..], &tail[..(decoded as usize)]);
+                    assert_eq!(consumed, int_len + (decoded as usize))
+                }
+            }
 
-              true
-          }
-      }
+            true
+        }
+    }
 
-      fn length_value_encode_all<'a, I: Iterator<Item = &'a mut [u8]>, T: AsRef<[u8]>>(enc: &mut super::LengthValueEncoder<T>, outs: &mut I)
--> usize{
+    fn length_value_encode_all<'a, I: Iterator<Item = &'a mut [u8]>, T: AsRef<[u8]>>(
+        enc: &mut super::LengthValueEncoder<T>,
+        outs: &mut I,
+    ) -> usize {
         let mut total_written = 0;
 
         for out in outs {
@@ -594,23 +597,23 @@ mod tests {
     }
 
     quickcheck! {
-          fn test_length_value_encoder(val: Vec<u8>, chunk_size: u8) -> bool {
-              let mut enc = super::LengthValueEncoder::new(&val);
+        fn test_length_value_encoder(val: Vec<u8>, chunk_size: u8) -> bool {
+            let mut enc = super::LengthValueEncoder::new(&val);
 
-              let mut buf = Vec::new();
-              buf.resize(9, 43);
-              let mut nb_buf = Vec::new();
-              nb_buf.resize(val.len() + 9, 44);
+            let mut buf = Vec::new();
+            buf.resize(9, 43);
+            let mut nb_buf = Vec::new();
+            nb_buf.resize(val.len() + 9, 44);
 
-              let written = encode(val.len() as u64, &mut buf);
-              buf.truncate(written);
-              buf.extend_from_slice(&val);
-              let nb_written = length_value_encode_all(&mut enc, &mut nb_buf.chunks_mut((chunk_size as usize) + 1));
+            let written = encode(val.len() as u64, &mut buf);
+            buf.truncate(written);
+            buf.extend_from_slice(&val);
+            let nb_written = length_value_encode_all(&mut enc, &mut nb_buf.chunks_mut((chunk_size as usize) + 1));
 
-              assert_eq!(nb_written, written + val.len());
-              assert_eq!(&nb_buf[..nb_written], &buf[..nb_written]);
+            assert_eq!(nb_written, written + val.len());
+            assert_eq!(&nb_buf[..nb_written], &buf[..nb_written]);
 
-              true
-          }
-      }
+            true
+        }
+    }
 }
