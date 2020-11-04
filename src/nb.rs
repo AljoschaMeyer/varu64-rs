@@ -50,7 +50,7 @@ impl Decoder {
             debug_assert!(self.parsed == 0);
             debug_assert!(total_consumed == 0);
             match b {
-                0...247 => {
+                0..=247 => {
                     return (1, Some(Ok(b as u64)));
                 }
 
@@ -93,8 +93,6 @@ impl Decoder {
                     self.total_length = 8;
                     return self.do_decode(&input[1..], total_consumed + 1);
                 }
-
-                _ => unreachable!(), // all 256 cases covered
             }
         } else {
             debug_assert!(self.total_length > self.parsed);
