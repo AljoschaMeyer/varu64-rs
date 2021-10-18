@@ -6,6 +6,10 @@ description = "A variable length encoding for unsigned 64 bit integers."
 repository = "https://github.com/AljoschaMeyer/varu64-rs"
 readme = "README.md"
 license = "AGPL-3.0"
+edition = "2018"
+
+[dependencies]
+snafu = {version = "0.6.10", default-features=false}
 
 [dev-dependencies]
 quickcheck = "0.7.2"
