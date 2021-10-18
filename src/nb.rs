@@ -423,6 +423,8 @@ impl<T: AsRef<[u8]>> LengthValueEncoder<T> {
 
 #[cfg(test)]
 mod tests {
+    use quickcheck::quickcheck;
+
     use super::super::*;
 
     fn decode_all(

@@ -1,11 +1,6 @@
 //! Implementation of the [varu64 format](https://github.com/AljoschaMeyer/varu64-rs) in rust.
 #![cfg_attr(not(feature = "std"), no_std)]
-#[cfg(test)]
-#[macro_use]
-extern crate quickcheck;
 
-extern crate core;
-extern crate snafu;
 use core::convert::TryFrom;
 use core::num::NonZeroU64;
 use snafu::{OptionExt, Snafu};
