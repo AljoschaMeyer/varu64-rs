@@ -4,8 +4,11 @@
 #[macro_use]
 extern crate quickcheck;
 
+extern crate snafu;
+use snafu::Snafu;
+
 #[cfg(feature = "std")]
-use std::{error, fmt, io};
+use std::io;
 
 #[cfg(feature = "std")]
 pub mod nb;
@@ -109,7 +112,7 @@ pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
     let first: u8;
     match input.get(0) {
         Some(b) => first = *b,
-        None => return Err((UnexpectedEndOfInput, input)),
+        None => return Err((DecodeError::UnexpectedEndOfInput, input)),
     }
 
     if (first | 0b0000_0111) == 0b1111_1111 {
@@ -124,12 +127,17 @@ pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
             out <<= 8;
             match input.get(i) {
                 Some(b) => out += *b as u64,
-                None => return Err((UnexpectedEndOfInput, &input[i..])),
+                None => return Err((DecodeError::UnexpectedEndOfInput, &input[i..])),
             }
         }
 
         if length > encoding_length(out) {
-            return Err((NonCanonical(out), &input[length..]));
+            return Err((
+                DecodeError::NonCanonical {
+                    encoded_number: out,
+                },
+                &input[length..],
+            ));
         } else {
             return Ok((out, &input[length..]));
         }
@@ -140,28 +148,14 @@ pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
 }
 
 /// Everything that can go wrong when decoding a varu64.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Snafu, PartialEq)]
 pub enum DecodeError {
     /// The encoding is not the shortest possible one for the number.
     /// Contains the encoded number.
-    NonCanonical(u64),
+    NonCanonical { encoded_number: u64 },
     /// The slice contains less data than the encoding needs.
     UnexpectedEndOfInput,
 }
-use DecodeError::*;
-
-#[cfg(feature = "std")]
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> std::result::Result<(), fmt::Error> {
-        match self {
-            NonCanonical(n) => write!(f, "Invalid varu64: NonCanonical encoding of {}", n),
-            UnexpectedEndOfInput => write!(f, "Invalid varu64: Not enough input bytes"),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl error::Error for DecodeError {}
 
 #[cfg(test)]
 mod tests {
@@ -193,21 +187,21 @@ mod tests {
         test_fixture(72057594037927935, &[254, 255, 255, 255, 255, 255, 255, 255]);
         test_fixture(72057594037927936, &[255, 1, 0, 0, 0, 0, 0, 0, 0]);
 
-        assert_eq!(decode(&[]).unwrap_err(), (UnexpectedEndOfInput, &[][..]));
-        assert_eq!(decode(&[248]).unwrap_err(), (UnexpectedEndOfInput, &[][..]));
+        assert_eq!(decode(&[]).unwrap_err(), (DecodeError::UnexpectedEndOfInput, &[][..]));
+        assert_eq!(decode(&[248]).unwrap_err(), (DecodeError::UnexpectedEndOfInput, &[][..]));
         assert_eq!(
             decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
-            (UnexpectedEndOfInput, &[][..])
+            (DecodeError::UnexpectedEndOfInput, &[][..])
         );
         assert_eq!(
             decode(&[255, 0, 1, 2, 3, 4, 5, 6]).unwrap_err(),
-            (UnexpectedEndOfInput, &[][..])
+            (DecodeError::UnexpectedEndOfInput, &[][..])
         );
 
-        assert_eq!(decode(&[248, 42]).unwrap_err(), (NonCanonical(42), &[][..]));
+        assert_eq!(decode(&[248, 42]).unwrap_err(), (DecodeError::NonCanonical{ encoded_number: 42}, &[][..]));
         assert_eq!(
             decode(&[249, 0, 42]).unwrap_err(),
-            (NonCanonical(42), &[][..])
+            (DecodeError::NonCanonical{encoded_number: 42}, &[][..])
         );
     }
 }

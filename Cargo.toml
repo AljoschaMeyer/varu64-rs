@@ -7,6 +7,9 @@ repository = "https://github.com/AljoschaMeyer/varu64-rs"
 readme = "README.md"
 license = "AGPL-3.0"
 
+[dependencies]
+snafu = {version = "0.6.10", default-features=false}
+
 [dev-dependencies]
 quickcheck = "0.7.2"
 
