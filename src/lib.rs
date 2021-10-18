@@ -4,7 +4,10 @@
 #[macro_use]
 extern crate quickcheck;
 
+extern crate core;
 extern crate snafu;
+use core::convert::TryFrom;
+use core::num::NonZeroU64;
 use snafu::Snafu;
 
 #[cfg(feature = "std")]
@@ -34,6 +37,39 @@ pub fn encoding_length(n: u64) -> usize {
     } else {
         9
     }
+}
+
+/// Encodes `n: NonZeroU64` into the output buffer, returning how many bytes have been written.
+///
+/// # Panics
+/// Panics if the buffer is not large enough to hold the encoding.
+pub fn encode_non_zero_u64(n: NonZeroU64, out: &mut [u8]) -> usize {
+    encode_gt_x(n.into(), 1, out)
+}
+
+fn encode_gt_x(n: u64, x: u64, out: &mut [u8]) -> usize {
+    encode(n - x, out)
+}
+
+/// Decode a `NonZeroU64` from the `input` buffer, returning the number and the remaining bytes.
+///
+/// # Errors
+/// On error, this also returns how many bytes were read (including the erroneous byte). In case
+/// of noncanonical data (encodings that are valid except they are not the smallest possible
+/// encoding), the full data is parsed, even if the non-canonicty could be detected early on.
+///
+/// If there is not enough input data, an `UnexpectedEndOfInput` error is returned, never
+/// a `NonCanonical` error (even if the partial input could already be detected to be
+/// noncanonical).
+pub fn decode_non_zero_u64(input: &[u8]) -> Result<(NonZeroU64, &[u8]), (DecodeError, &[u8])> {
+    decode_gt_x(input, 1).and_then(|(n, buff)| match NonZeroU64::try_from(n) {
+        Ok(num) => Ok((num, buff)),
+        Err(_) => Err((DecodeError::ExpectedANonZeroU64, buff)),
+    })
+}
+
+fn decode_gt_x(input: &[u8], x: u64) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
+    decode(input).map(|(n, buff)| (n + x, buff))
 }
 
 /// Encodes `n` into the output buffer, returning how many bytes have been written.
@@ -155,6 +191,8 @@ pub enum DecodeError {
     NonCanonical { encoded_number: u64 },
     /// The slice contains less data than the encoding needs.
     UnexpectedEndOfInput,
+    /// Did not encode a non-zero u64
+    ExpectedANonZeroU64,
 }
 
 #[cfg(test)]
@@ -187,8 +225,14 @@ mod tests {
         test_fixture(72057594037927935, &[254, 255, 255, 255, 255, 255, 255, 255]);
         test_fixture(72057594037927936, &[255, 1, 0, 0, 0, 0, 0, 0, 0]);
 
-        assert_eq!(decode(&[]).unwrap_err(), (DecodeError::UnexpectedEndOfInput, &[][..]));
-        assert_eq!(decode(&[248]).unwrap_err(), (DecodeError::UnexpectedEndOfInput, &[][..]));
+        assert_eq!(
+            decode(&[]).unwrap_err(),
+            (DecodeError::UnexpectedEndOfInput, &[][..])
+        );
+        assert_eq!(
+            decode(&[248]).unwrap_err(),
+            (DecodeError::UnexpectedEndOfInput, &[][..])
+        );
         assert_eq!(
             decode(&[255, 0, 1, 2, 3, 4, 5]).unwrap_err(),
             (DecodeError::UnexpectedEndOfInput, &[][..])
@@ -198,10 +242,24 @@ mod tests {
             (DecodeError::UnexpectedEndOfInput, &[][..])
         );
 
-        assert_eq!(decode(&[248, 42]).unwrap_err(), (DecodeError::NonCanonical{ encoded_number: 42}, &[][..]));
+        assert_eq!(
+            decode(&[248, 42]).unwrap_err(),
+            (DecodeError::NonCanonical { encoded_number: 42 }, &[][..])
+        );
         assert_eq!(
             decode(&[249, 0, 42]).unwrap_err(),
-            (DecodeError::NonCanonical{encoded_number: 42}, &[][..])
+            (DecodeError::NonCanonical { encoded_number: 42 }, &[][..])
         );
+    }
+
+    #[test]
+    fn encode_decode_non_zero_u64() {
+        let expected = NonZeroU64::new(3).unwrap();
+        let mut buffer = [0; 4];
+        let encoded_length = encode_non_zero_u64(expected, &mut buffer);
+
+        let (decoded, _) = decode_non_zero_u64(&buffer[..encoded_length]).unwrap();
+
+        assert_eq!(decoded, expected);
     }
 }
