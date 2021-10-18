@@ -8,7 +8,7 @@ extern crate core;
 extern crate snafu;
 use core::convert::TryFrom;
 use core::num::NonZeroU64;
-use snafu::Snafu;
+use snafu::{OptionExt, Snafu};
 
 #[cfg(feature = "std")]
 use std::io;
@@ -145,11 +145,10 @@ fn write_bytes(n: u64, k: usize, out: &mut [u8]) {
 /// a `NonCanonical` error (even if the partial input could already be detected to be
 /// noncanonical).
 pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
-    let first: u8;
-    match input.get(0) {
-        Some(b) => first = *b,
-        None => return Err((DecodeError::UnexpectedEndOfInput, input)),
-    }
+    let first = input
+        .get(0)
+        .context(UnexpectedEndOfInput)
+        .map_err(|err| (err, input))?;
 
     if (first | 0b0000_0111) == 0b1111_1111 {
         // first five bytes are ones, value is 248 or more
@@ -161,10 +160,12 @@ pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
 
         for i in 1..length {
             out <<= 8;
-            match input.get(i) {
-                Some(b) => out += *b as u64,
-                None => return Err((DecodeError::UnexpectedEndOfInput, &input[i..])),
-            }
+
+            input
+                .get(i)
+                .context(UnexpectedEndOfInput)
+                .map_err(|err| (err, &input[i..]))
+                .map(|b| out += *b as u64)?;
         }
 
         if length > encoding_length(out) {
@@ -179,7 +180,7 @@ pub fn decode(input: &[u8]) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
         }
     } else {
         // value is less than 248
-        return Ok((first as u64, &input[1..]));
+        return Ok((*first as u64, &input[1..]));
     }
 }
 
