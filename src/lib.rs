@@ -34,16 +34,25 @@ pub fn encoding_length(n: u64) -> usize {
     }
 }
 
+/// Return how many bytes the encoding of `n: NonZeroU64` will take up.
+pub fn encoding_length_non_zero_u64(n: NonZeroU64) -> usize {
+    encoding_length_gt_x(u64::from(n), 0)
+}
+
+fn encoding_length_gt_x(n: u64, x: u64) -> usize {
+    encoding_length(u64::from(n) - 1 - x)
+}
+
 /// Encodes `n: NonZeroU64` into the output buffer, returning how many bytes have been written.
 ///
 /// # Panics
 /// Panics if the buffer is not large enough to hold the encoding.
 pub fn encode_non_zero_u64(n: NonZeroU64, out: &mut [u8]) -> usize {
-    encode_gt_x(n.into(), 1, out)
+    encode_gt_x(n.into(), 0, out)
 }
 
 fn encode_gt_x(n: u64, x: u64, out: &mut [u8]) -> usize {
-    encode(n - x, out)
+    encode(n - 1 - x, out)
 }
 
 /// Decode a `NonZeroU64` from the `input` buffer, returning the number and the remaining bytes.
@@ -57,14 +66,14 @@ fn encode_gt_x(n: u64, x: u64, out: &mut [u8]) -> usize {
 /// a `NonCanonical` error (even if the partial input could already be detected to be
 /// noncanonical).
 pub fn decode_non_zero_u64(input: &[u8]) -> Result<(NonZeroU64, &[u8]), (DecodeError, &[u8])> {
-    decode_gt_x(input, 1).and_then(|(n, buff)| match NonZeroU64::try_from(n) {
+    decode_gt_x(input, 0).and_then(|(n, buff)| match NonZeroU64::try_from(n) {
         Ok(num) => Ok((num, buff)),
         Err(_) => Err((DecodeError::ExpectedANonZeroU64, buff)),
     })
 }
 
 fn decode_gt_x(input: &[u8], x: u64) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
-    decode(input).map(|(n, buff)| (n + x, buff))
+    decode(input).map(|(n, buff)| (n + x + 1, buff))
 }
 
 /// Encodes `n` into the output buffer, returning how many bytes have been written.
