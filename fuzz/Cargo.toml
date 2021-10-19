@@ -20,3 +20,7 @@ members = ["."]
 [[bin]]
 name = "roundtrip"
 path = "fuzz_targets/roundtrip.rs"
+
+[[bin]]
+name = "roundtrip_non_zero"
+path = "fuzz_targets/roundtrip_non_zero.rs"
