@@ -73,7 +73,12 @@ pub fn decode_non_zero_u64(input: &[u8]) -> Result<(NonZeroU64, &[u8]), (DecodeE
 }
 
 fn decode_gt_x(input: &[u8], x: u64) -> Result<(u64, &[u8]), (DecodeError, &[u8])> {
-    decode(input).map(|(n, buff)| (n + x + 1, buff))
+    decode(input).and_then(|(n, buff)| {
+        let res = n.checked_add(x + 1)
+            .context(EncodedNonZeroValueOverflowed)
+            .map_err(|err| (err, buff))?;
+        Ok((res, buff))
+    })
 }
 
 /// Encodes `n` into the output buffer, returning how many bytes have been written.
@@ -198,6 +203,8 @@ pub enum DecodeError {
     UnexpectedEndOfInput,
     /// Did not encode a non-zero u64
     ExpectedANonZeroU64,
+    /// Encoded a value that overflowed when converting from varu64 to non_zero value
+    EncodedNonZeroValueOverflowed,
 }
 
 #[cfg(test)]
@@ -267,4 +274,14 @@ mod tests {
 
         assert_eq!(decoded, expected);
     }
+    #[test]
+    fn decode_non_zero_u64_no_panic_with_too_large_encoded_value() {
+        let mut buffer = [0; 9];
+        let encoded_length = encode(u64::MAX, &mut buffer);
+
+        let res = decode_non_zero_u64(&buffer[..encoded_length]);
+
+        assert!(res.is_err());
+    }
+
 }
